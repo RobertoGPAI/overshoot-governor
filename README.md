@@ -1,7 +1,10 @@
 # Overshoot Governor
 
 **Token-budget admission control for multi-agent systems, designed with Donella
-Meadows.** Kaggle capstone — Roberto García Patrón.
+Meadows.** Kaggle capstone (AI Agents: Intensive Vibe Coding, track **Agents
+for Business**) — Roberto García Patrón.
+
+![Architecture](figures/architecture.png)
 
 A token budget in a multi-agent system has the three ingredients Meadows
 identified for *overshoot and collapse*: growth (bursty concurrent calls), a
@@ -31,10 +34,12 @@ three seeded experiments. Full narrative and results:
 ```
 src/governor/          core: AtomicLedger, OutputEstimator, QuotaNode
 src/governor/adk_plugin.py   BudgetGovernorPlugin (ADK 2.x Runner plugin)
+src/governor/mcp_server.py   the same ledger as an MCP server (cross-runtime)
 sim/simulation.py      the three experiments (python sim/simulation.py)
 demo/run_adk_demo.py   live Gemini A/B demo: meter on vs off (needs GOOGLE_API_KEY)
-tests/                 9 unit tests (race exposure, atomicity, lease invariants)
+tests/                 11 unit tests (race exposure, atomicity, lease invariants, MCP)
 security/threat_model.md     STRIDE analysis (SKILLSTRIDE methodology)
+docs/                  Kaggle writeup draft + video script
 build_notebook.py      regenerates the Kaggle notebook from these sources
 ```
 
@@ -42,10 +47,30 @@ build_notebook.py      regenerates the Kaggle notebook from these sources
 
 ```bash
 pip install -r requirements.txt
-python -m pytest tests -q      # 9 tests
+python -m pytest tests -q      # 11 tests
 python sim/simulation.py       # runs the 3 experiments, saves figures/
 python demo/run_adk_demo.py    # live ADK demo (set GOOGLE_API_KEY first)
+python -m governor.mcp_server  # governor as MCP server (GOVERNOR_BUDGET env)
 ```
+
+For the MCP server, run it from `src/` (or `pip install -e .`); budget and
+reserve come from `GOVERNOR_BUDGET` / `GOVERNOR_RESERVE` env vars. ADK agents
+can mount its tools with `MCPToolset` (see the module docstring).
+
+## Course concepts demonstrated (capstone rubric)
+
+| Concept | Where |
+|---|---|
+| Multi-agent system (ADK 2.0) | [`src/governor/adk_plugin.py`](src/governor/adk_plugin.py), [`demo/run_adk_demo.py`](demo/run_adk_demo.py) |
+| MCP server | [`src/governor/mcp_server.py`](src/governor/mcp_server.py) |
+| Security features | [`security/threat_model.md`](security/threat_model.md), [Semgrep CI](.github/workflows/security.yml), [pre-commit](.pre-commit-config.yaml) |
+| Agent skills | [SKILLSTRIDE](https://github.com/RobertoGPAI/SKILLSTRIDE) applied to this workspace |
+| Deployability | MCP server runs standalone; ADK app servable via `adk api_server` (video) |
+
+Submission assets: writeup draft in [`docs/kaggle_writeup.md`](docs/kaggle_writeup.md),
+video script in [`docs/video_script.md`](docs/video_script.md), cover image
+[`figures/architecture.png`](figures/architecture.png), executed notebook
+[`overshoot-governor-capstone.ipynb`](overshoot-governor-capstone.ipynb).
 
 ## Security
 
