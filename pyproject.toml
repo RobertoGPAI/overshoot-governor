@@ -1,0 +1,13 @@
+[project]
+name = "overshoot-governor"
+version = "0.1.0"
+description = "Token-budget admission control for multi-agent systems (ADK 2.0), designed with Donella Meadows"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+ignore = ["E501"]
