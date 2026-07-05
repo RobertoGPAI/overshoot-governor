@@ -80,4 +80,4 @@ The `asyncio` ledger serializes admission within one process; multi-runner fleet
 
 **Repo:** github.com/RobertoGPAI/overshoot-governor (tests, simulations, executed notebook, threat model, live demo). **Video:** attached.
 
-*Word count: ~1,450.*
+*Word count: ~1,600 (limit 2,500).*
