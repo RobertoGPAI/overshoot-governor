@@ -10,9 +10,20 @@ A token budget in a multi-agent system has the three ingredients Meadows
 identified for *overshoot and collapse*: growth (bursty concurrent calls), a
 limit (the budget), and a delay in the feedback about the limit (in-flight
 calls whose cost is unknown until they complete). This project builds the
-governor that fixes it, as an **ADK 2.0 Runner plugin**, and evaluates it with
-three seeded experiments. Full narrative and results:
+governor that fixes it and evaluates it with three seeded experiments. Full
+narrative: [`docs/kaggle_writeup.md`](docs/kaggle_writeup.md); executed,
+reproducible report:
 [`overshoot-governor-capstone.ipynb`](overshoot-governor-capstone.ipynb).
+
+**Architecture: one policy core, two adapters.** The governor core
+(`AtomicLedger`, `OutputEstimator`, `QuotaNode`) is a framework-agnostic
+policy engine — pure Python, fully unit-testable, no I/O. Two thin adapters
+expose the *same ledger*: the **ADK 2.0 Runner plugin** (the primary
+enforcement point — registered once, it covers every agent and every spawned
+subagent) and the **MCP server** (so non-ADK runtimes — Claude Code sessions,
+CI scripts — share the same budget). Enforcement semantics live in one place
+and cannot drift between surfaces; adding a third surface (e.g. a LiteLLM
+proxy hook) would be another ~100-line adapter.
 
 ## Findings (seeded simulations, details in the notebook)
 
