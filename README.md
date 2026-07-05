@@ -10,7 +10,7 @@ A token budget in a multi-agent system has the three ingredients Meadows
 identified for *overshoot and collapse*: growth (bursty concurrent calls), a
 limit (the budget), and a delay in the feedback about the limit (in-flight
 calls whose cost is unknown until they complete). This project builds the
-governor that fixes it and evaluates it with three seeded experiments. Full
+governor that fixes it and evaluates it with four seeded experiments. Full
 narrative: [`docs/kaggle_writeup.md`](docs/kaggle_writeup.md); executed,
 reproducible report:
 [`overshoot-governor-capstone.ipynb`](overshoot-governor-capstone.ipynb).
@@ -44,17 +44,22 @@ proxy hook) would be another ~100-line adapter.
    mission-tied justification (granted from a protected tranche, rationed and
    logged, never touching the completion reserve) rescues nearly all of them
    — more tasks delivered while spending *less*, same hard cap, zero
-   overshoot. Governed agents get voice, not just compliance.
+   overshoot. Governed agents get voice, not just compliance. Appeals can be
+   heard by a **judge agent** (`MissionJudge`) — deliberately not the
+   quota-allocating coordinator (*nemo iudex in causa sua*) — whose hearings
+   are themselves billed to the ledger: justice isn't free, so appeal spam
+   exhausts the hearing budget, never the mission's.
 
 ## Layout
 
 ```
 src/governor/          core: AtomicLedger, OutputEstimator, QuotaNode, AppealsDesk
+src/governor/judge.py  MissionJudge: budgeted arbiter agent for appeals
 src/governor/adk_plugin.py   BudgetGovernorPlugin (ADK 2.x Runner plugin)
 src/governor/mcp_server.py   the same ledger as an MCP server (cross-runtime)
-sim/simulation.py      the three experiments (python sim/simulation.py)
+sim/simulation.py      the four experiments (python sim/simulation.py)
 demo/run_adk_demo.py   live Gemini A/B demo: meter on vs off (needs GOOGLE_API_KEY)
-tests/                 13 unit tests (races, atomicity, leases, appeals, MCP)
+tests/                 15 unit tests (races, atomicity, leases, appeals, judge, MCP)
 security/threat_model.md     STRIDE analysis (SKILLSTRIDE methodology)
 docs/                  Kaggle writeup draft + video script
 build_notebook.py      regenerates the Kaggle notebook from these sources
@@ -64,8 +69,8 @@ build_notebook.py      regenerates the Kaggle notebook from these sources
 
 ```bash
 pip install -r requirements.txt
-python -m pytest tests -q      # 13 tests
-python sim/simulation.py       # runs the 3 experiments, saves figures/
+python -m pytest tests -q      # 15 tests
+python sim/simulation.py       # runs the 4 experiments, saves figures/
 python demo/run_adk_demo.py    # live ADK demo (set GOOGLE_API_KEY first)
 python -m governor.mcp_server  # governor as MCP server (GOVERNOR_BUDGET env)
 ```

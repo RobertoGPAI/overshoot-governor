@@ -34,6 +34,7 @@ ledger_src = read("src/governor/ledger.py")
 estimator_src = read("src/governor/estimator.py")
 quota_src = read("src/governor/quota.py")
 appeals_src = strip_lines(read("src/governor/appeals.py"), ["from .ledger import"])
+judge_src = strip_lines(read("src/governor/judge.py"), ["from .ledger import"])
 
 sim_src = read("sim/simulation.py")
 sim_src = cut_from(sim_src, "def main() -> None:")
@@ -59,6 +60,7 @@ plugin_src = strip_lines(
         "from __future__ import annotations",
         "from .appeals import",
         "from .estimator import",
+        "from .judge import",
         "from .ledger import",
     ],
 )
@@ -361,6 +363,7 @@ cells = [
     nbf.v4.new_code_cell(estimator_src),
     nbf.v4.new_code_cell(quota_src),
     nbf.v4.new_code_cell(appeals_src),
+    nbf.v4.new_code_cell(judge_src),
     nbf.v4.new_code_cell(sim_src),
     nbf.v4.new_markdown_cell(EXP1_MD),
     nbf.v4.new_code_cell(

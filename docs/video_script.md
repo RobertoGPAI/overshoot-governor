@@ -79,10 +79,14 @@ work: a task denied at its final step wastes everything already spent on it.
 So denials carry a right of appeal. A denied agent can state — in one line —
 why finishing its task protects the overall mission, which every agent
 carries in its context. Granted appeals draw from a protected tranche,
-rationed and logged, never from the completion reserve. Result: same hard
-cap, zero overshoot, one more task delivered, seven times less stranded
-work — while spending less. Enforcement, information, and voice: the agent
-is governed the way citizens are, not the way resources are."
+rationed and logged, never from the completion reserve. Appeals can even be
+heard by a judge agent — deliberately not the coordinator that allocates the
+quotas, because nobody should be judge in their own cause — and the hearing
+itself is billed to the same ledger: justice isn't free, so appeal spam
+exhausts the hearing budget, never the mission's. Result: same hard cap,
+zero overshoot, one more task delivered, seven times less stranded work —
+while spending less. Enforcement, information, and voice: the agent is
+governed the way citizens are, not the way resources are."
 
 **ES:** Muestra fig5 y la tabla del Exp. 4; señala "appeals granted" y
 "wasted tokens".

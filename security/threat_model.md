@@ -39,7 +39,7 @@ Assets: the token budget (financial), the mission outcome (availability of the
 | Function/tool abuse | Repeated tool invocations amplify context size and cost per call | Medium | Input side counted per request; growth shows up in reservations immediately |
 | Governor-text spoofing | Malicious content imitates `[BUDGET GOVERNOR]` messages to manipulate agents | Medium | Enforcement never depends on the text; visibility is advisory only. Residual: agent behavior may be nudged — accepted, since hard limits hold |
 | Denial-of-wallet via estimator poisoning | Adversarial tasks inflate p90 history to starve admission | Low | Estimates are capped by `max_output_tokens`; worst case degrades to worst-case reservation, never past the budget |
-| Appeal-channel abuse | Injected agent spams plausible-sounding appeals to drain the appeal tranche | Medium | Appeals rationed per agent; tranche bounded and never touches the completion reserve; every appeal logged with its justification (audit trail); optional `judge` hook for arbitration by a coordinator |
+| Appeal-channel abuse | Injected agent spams plausible-sounding appeals to drain the appeal tranche | Medium | Appeals rationed per agent; tranche bounded and never touches the completion reserve; every appeal logged with its justification (audit trail); optional budgeted arbiter (`MissionJudge`) — hearings are billed to the priority tranche, so appeal spam exhausts the hearing budget rather than the mission's, and the arbiter is deliberately not the quota-allocating coordinator (*nemo iudex in causa sua*) |
 
 ## Phase 4 — Risk assessment summary
 

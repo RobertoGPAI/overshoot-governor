@@ -17,12 +17,14 @@ Adapters are imported lazily: the core works wherever Python does.
 
 from .appeals import AppealsDesk, AppealsLog
 from .estimator import OutputEstimator
+from .judge import MissionJudge
 from .ledger import AtomicLedger, NaiveLedger, Reservation
 from .quota import QuotaError, QuotaNode
 
 __all__ = [
     "AppealsDesk",
     "AppealsLog",
+    "MissionJudge",
     "AtomicLedger",
     "NaiveLedger",
     "Reservation",

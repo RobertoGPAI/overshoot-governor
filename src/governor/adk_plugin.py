@@ -39,6 +39,7 @@ from google.genai import types
 
 from .appeals import AppealsDesk
 from .estimator import OutputEstimator
+from .judge import MissionJudge
 from .ledger import AtomicLedger, Reservation
 
 APPEAL_MARKER = "APPEAL:"
@@ -88,6 +89,7 @@ class BudgetGovernorPlugin(BasePlugin):
         visibility: bool = True,
         mission: str | None = None,
         estimator: OutputEstimator | None = None,
+        arbiter: bool = False,
         name: str = "budget_governor",
     ) -> None:
         super().__init__(name=name)
@@ -96,7 +98,17 @@ class BudgetGovernorPlugin(BasePlugin):
             reserve_fraction=reserve_fraction,
             appeal_fraction=appeal_fraction,
         )
-        self.appeals = AppealsDesk(self.ledger)
+        # With arbiter=True (and a mission), appeals are heard by a separate
+        # judge agent -- deliberately NOT the coordinator (nemo iudex in causa
+        # sua) -- whose hearings are themselves budgeted on this ledger.
+        self.judge = (
+            MissionJudge(mission=mission, ledger=self.ledger)
+            if arbiter and mission
+            else None
+        )
+        self.appeals = AppealsDesk(
+            self.ledger, judge=self.judge.rule if self.judge else None
+        )
         self.estimator = estimator or OutputEstimator()
         self.visibility = visibility
         self.mission = mission

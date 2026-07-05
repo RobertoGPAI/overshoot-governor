@@ -154,6 +154,50 @@ def test_appeal_requires_justification_and_is_rationed():
     asyncio.run(scenario())
 
 
+def test_judge_rules_and_the_hearing_is_billed():
+    """A GRANT admits the appeal; the hearing's own tokens hit the ledger."""
+    from governor import MissionJudge
+
+    async def scenario():
+        ledger = AtomicLedger(budget=10_000, reserve_fraction=0.10, appeal_fraction=0.10)
+
+        async def fake_model(prompt: str) -> tuple[str, int]:
+            assert "the mission" in prompt.lower()
+            return ("REFUSE" if "speculative" in prompt else "GRANT", 120)
+
+        judge = MissionJudge("ship the report", ledger, caller=fake_model)
+        desk = AppealsDesk(ledger, judge=judge.rule)
+
+        assert await desk.appeal("a", 100, "final synthesis step") is not None
+        assert await desk.appeal("b", 100, "speculative side quest") is None
+        assert judge.hearings == 2  # both cases were heard...
+        assert ledger.spent == 240  # ...and both hearings were billed
+
+    asyncio.run(scenario())
+
+
+def test_judge_abstains_offline_and_refuses_when_broke():
+    from governor import MissionJudge
+
+    async def scenario():
+        ledger = AtomicLedger(budget=1000, reserve_fraction=0.0, appeal_fraction=0.0)
+        # offline (no caller): abstains -> desk's mechanical policy decides
+        judge = MissionJudge("mission", ledger, caller=None)
+        assert await judge.rule("a", 100, "reason") is True
+
+        # broke: cannot afford the hearing -> the appeal is refused outright
+        async def fake_model(prompt: str) -> tuple[str, int]:
+            return "GRANT", 10
+
+        r = await ledger.try_reserve(1000)
+        await ledger.settle(r, 1000)  # budget fully spent
+        judge = MissionJudge("mission", ledger, caller=fake_model)
+        assert await judge.rule("a", 100, "reason") is False
+        assert judge.hearings == 0
+
+    asyncio.run(scenario())
+
+
 def test_spawn_cascade_self_extinguishes():
     """Recursive spawning under lease semantics runs out of divisible quota."""
     root = QuotaNode("root", 10_000)
