@@ -32,7 +32,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from governor import AtomicLedger, NaiveLedger, OutputEstimator, QuotaNode
+from governor import AppealsDesk, AtomicLedger, NaiveLedger, OutputEstimator, QuotaNode
 
 MAX_OUTPUT_TOKENS = 2048  # configured cap, used as the worst-case estimate
 LATENCY_RANGE = (0.004, 0.016)  # simulated seconds per LLM call
@@ -359,6 +359,102 @@ def run_experiment_meter(**kwargs) -> list[MeterResult]:
 
 
 # --------------------------------------------------------------------------
+# Experiment 4: the right of appeal (voice)
+# --------------------------------------------------------------------------
+
+@dataclass
+class AppealExpResult:
+    condition: str
+    budget: int
+    spent: int
+    tasks_completed: int
+    tasks_stranded: int
+    wasted_tokens: int  # spend sunk into tasks that never finished
+    appeals_granted: int
+
+    @property
+    def overshoot_pct(self) -> float:
+        return 100.0 * max(0, self.spent - self.budget) / self.budget
+
+
+async def _run_appeal_exp(budget: int, enabled: bool, seed: int) -> AppealExpResult:
+    """Tasks need 5 calls; abandon one mid-way and all its prior spend is
+    wasted (stranded work). A call is *appealable* when its task already has
+    sunk spend: finishing started work is what protects the mission.
+
+    Same hard cap in both conditions. With appeals enabled, ordinary admission
+    stops at 85% and the 85-95% tranche is reachable only by appealed calls
+    that rescue in-progress tasks; disabled, ordinary admission uses the full
+    95% but the wall is blind to what it strands.
+    """
+    ledger = AtomicLedger(
+        budget,
+        reserve_fraction=0.05,
+        appeal_fraction=0.10 if enabled else 0.0,
+    )
+    desk = AppealsDesk(ledger, max_grants_per_agent=2)
+    estimator = OutputEstimator(prior=MAX_OUTPUT_TOKENS)
+    completed = stranded = wasted = 0
+
+    async def agent_loop(agent: str, rng) -> None:
+        # per-agent rng stream: token draws don't depend on asyncio
+        # interleaving, so both conditions face the same workload
+        nonlocal completed, stranded, wasted
+        while True:
+            task_spend = 0
+            task_appealed = False  # a won appeal covers the whole task
+            for _ in range(5):
+                input_tokens = int(rng.lognormal(6.3, 0.4))
+                output_tokens = int(rng.lognormal(6.0, 0.6))
+                estimate = input_tokens + estimator.predict(agent)
+                reservation = await ledger.try_reserve(estimate, priority=task_appealed)
+                if reservation is None and enabled and task_spend > 0 and not task_appealed:
+                    # the appeal is for the administrative act -- finishing
+                    # this task -- not for a single call
+                    reservation = await desk.appeal(
+                        agent, estimate,
+                        f"task in progress with {task_spend} tokens sunk: "
+                        "completing it protects the mission's prior spend",
+                    )
+                    task_appealed = reservation is not None
+                if reservation is None:
+                    if task_spend:
+                        stranded += 1
+                        wasted += task_spend
+                    return
+                await asyncio.sleep(rng.uniform(*LATENCY_RANGE))
+                actual = input_tokens + output_tokens
+                await ledger.settle(reservation, actual)
+                estimator.update(agent, output_tokens)
+                task_spend += actual
+            completed += 1
+
+    await asyncio.gather(
+        *(
+            agent_loop(f"agent_{i}", np.random.default_rng((seed, i)))
+            for i in range(8)
+        )
+    )
+    return AppealExpResult(
+        "with right of appeal" if enabled else "hard wall (no appeal)",
+        budget, ledger.spent, completed, stranded, wasted, desk.log.granted,
+    )
+
+
+async def run_experiment_appeals_async(
+    budget: int = 100_000, seed: int = 31
+) -> list[AppealExpResult]:
+    return [
+        await _run_appeal_exp(budget, enabled=False, seed=seed),
+        await _run_appeal_exp(budget, enabled=True, seed=seed),
+    ]
+
+
+def run_experiment_appeals(**kwargs) -> list[AppealExpResult]:
+    return asyncio.run(run_experiment_appeals_async(**kwargs))
+
+
+# --------------------------------------------------------------------------
 # Figures and report
 # --------------------------------------------------------------------------
 
@@ -449,13 +545,46 @@ def plot_meter(results3, outdir: Path) -> None:
     fig.savefig(outdir / "fig4_meter.png", dpi=140)
 
 
-def plot_all(results1, results2, results3, outdir: Path) -> None:
+def plot_appeals(results4, outdir: Path) -> None:
+    import matplotlib.pyplot as plt
+
+    outdir.mkdir(exist_ok=True)
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    names = [r.condition for r in results4]
+    x = np.arange(len(names))
+
+    b1 = axes[0].bar(x - 0.18, [r.tasks_completed for r in results4], 0.36,
+                     label="tasks completed", color="tab:green")
+    b2 = axes[0].bar(x + 0.18, [r.tasks_stranded for r in results4], 0.36,
+                     label="tasks stranded", color="tab:red")
+    axes[0].bar_label(b1)
+    axes[0].bar_label(b2)
+    axes[0].set_xticks(x, names, fontsize=9)
+    axes[0].set_title("delivered vs stranded work", fontsize=10)
+    axes[0].legend(fontsize=8)
+
+    b3 = axes[1].bar(names, [r.wasted_tokens for r in results4], color="tab:orange")
+    axes[1].bar_label(b3, fmt="{:,.0f}")
+    axes[1].set_title("tokens sunk into unfinished tasks", fontsize=10)
+    axes[1].tick_params(axis="x", labelsize=9)
+
+    fig.suptitle(
+        "Exp. 4 — the right of appeal: same hard cap, less stranded work "
+        f"(appeals granted: {results4[1].appeals_granted})"
+    )
+    fig.tight_layout()
+    fig.savefig(outdir / "fig5_appeals.png", dpi=140)
+
+
+def plot_all(results1, results2, results3, outdir: Path, results4=None) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     plot_concurrency(results1, outdir)
     plot_spawning(results2, outdir)
     plot_meter(results3, outdir)
+    if results4 is not None:
+        plot_appeals(results4, outdir)
 
 
 def print_concurrency(results1) -> None:
@@ -483,10 +612,20 @@ def print_meter(results3) -> None:
         )
 
 
+def print_appeals(results4) -> None:
+    for r in results4:
+        print(
+            f"{r.condition:24} spent={r.spent:>8,}  completed={r.tasks_completed:>3}  "
+            f"stranded={r.tasks_stranded:>2}  wasted={r.wasted_tokens:>7,}  "
+            f"appeals={r.appeals_granted}  overshoot={r.overshoot_pct:.1f}%"
+        )
+
+
 def main() -> None:
     results1 = run_experiment_concurrency()
     results2 = run_experiment_spawning()
     results3 = run_experiment_meter()
+    results4 = run_experiment_appeals()
 
     print("\nExp. 1 — concurrent admission (budget 150,000 tokens)")
     print_concurrency(results1)
@@ -497,7 +636,14 @@ def main() -> None:
     print("\nExp. 3 — budget visibility (budget 120,000 tokens)")
     print_meter(results3)
 
-    plot_all(results1, results2, results3, Path(__file__).resolve().parents[1] / "figures")
+    print("\nExp. 4 — the right of appeal (budget 80,000 tokens)")
+    print_appeals(results4)
+
+    plot_all(
+        results1, results2, results3,
+        Path(__file__).resolve().parents[1] / "figures",
+        results4=results4,
+    )
     print("\nFigures saved to figures/")
 
 

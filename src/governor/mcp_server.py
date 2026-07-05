@@ -26,6 +26,7 @@ import uuid
 
 from mcp.server.fastmcp import FastMCP
 
+from .appeals import AppealsDesk
 from .estimator import OutputEstimator
 from .ledger import AtomicLedger, Reservation
 
@@ -34,8 +35,10 @@ mcp = FastMCP("overshoot-governor")
 _ledger = AtomicLedger(
     budget=int(os.environ.get("GOVERNOR_BUDGET", "100000")),
     reserve_fraction=float(os.environ.get("GOVERNOR_RESERVE", "0.10")),
+    appeal_fraction=float(os.environ.get("GOVERNOR_APPEAL", "0.05")),
 )
 _estimator = OutputEstimator()
+_desk = AppealsDesk(_ledger)
 _reservations: dict[str, tuple[Reservation, str]] = {}
 
 
@@ -95,6 +98,24 @@ async def cancel(reservation_id: str) -> dict:
         return {"ok": False, "reason": "unknown or already-settled reservation_id"}
     await _ledger.cancel(entry[0])
     return {"ok": True, "available": _ledger.available}
+
+
+@mcp.tool()
+async def appeal(agent: str, input_tokens: int, justification: str) -> dict:
+    """Contest a denied admission: a justified appeal may enter the protected
+    appeal tranche (never the completion reserve). Rationed per agent and
+    logged with its justification."""
+    estimate = input_tokens + _estimator.predict(agent)
+    reservation = await _desk.appeal(agent, estimate, justification)
+    if reservation is None:
+        return {
+            "admitted": False,
+            "reason": "appeal refused (missing justification, ration exhausted, "
+                      "or appeal tranche depleted)",
+        }
+    rid = uuid.uuid4().hex[:12]
+    _reservations[rid] = (reservation, agent)
+    return {"admitted": True, "reservation_id": rid, "reserved": estimate}
 
 
 @mcp.tool()

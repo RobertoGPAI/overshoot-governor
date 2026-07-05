@@ -2,7 +2,7 @@
 
 > Graba pantalla + voz. Narración sugerida en inglés (los jueces evalúan en
 > inglés); debajo de cada bloque tienes la idea en español por si prefieres
-> locutar en español con subtítulos en inglés. Total apuntado: ~4:30.
+> locutar en español con subtítulos en inglés. Total apuntado: ~4:50.
 
 ---
 
@@ -72,7 +72,25 @@ los dos reports del ledger (blind vs sighted).
 
 *En pantalla: fig4 → demo en vivo o captura del output del demo.*
 
-## 3:20–4:00 — Security (concepto del curso)
+## 3:20–3:50 — The right of appeal (el "wow")
+
+**EN:** "One last mechanism, because a wall that can't be contested strands
+work: a task denied at its final step wastes everything already spent on it.
+So denials carry a right of appeal. A denied agent can state — in one line —
+why finishing its task protects the overall mission, which every agent
+carries in its context. Granted appeals draw from a protected tranche,
+rationed and logged, never from the completion reserve. Result: same hard
+cap, zero overshoot, one more task delivered, seven times less stranded
+work — while spending less. Enforcement, information, and voice: the agent
+is governed the way citizens are, not the way resources are."
+
+**ES:** Muestra fig5 y la tabla del Exp. 4; señala "appeals granted" y
+"wasted tokens".
+
+*En pantalla: fig5_appeals.png → el DENIAL_TEXT con el 'APPEAL:' en el
+código del plugin.*
+
+## 3:50–4:20 — Security (concepto del curso)
 
 **EN:** "Unbounded token spend is a security problem: denial of service on
 the wallet. The repo is threat-modeled with SKILLSTRIDE, our STRIDE skill for
@@ -87,9 +105,9 @@ workflow de Semgrep; menciona SKILLSTRIDE con tu repo en pantalla.
 *En pantalla: threat_model.md scrolleando → workflow security.yml → (badge CI
 si ya hiciste push).*
 
-## 4:00–4:30 — The build + deployability + close
+## 4:20–4:50 — The build + deployability + close
 
-**EN:** "Eleven unit tests pin the claims — the naive ledger provably races
+**EN:** "Thirteen unit tests pin the claims — the naive ledger provably races
 in a test; the atomic one provably can't. Everything reproduces from a clean
 clone in under a minute. The MCP server runs standalone today, and the ADK
 app deploys with adk api_server or Cloud Run. It's about 200 lines of core

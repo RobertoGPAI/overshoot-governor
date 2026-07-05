@@ -66,7 +66,7 @@ def build_team() -> LlmAgent:
 
 async def run_once(budget: int, visibility: bool) -> BudgetGovernorPlugin:
     governor = BudgetGovernorPlugin(
-        budget=budget, reserve_fraction=0.10, visibility=visibility
+        budget=budget, reserve_fraction=0.10, visibility=visibility, mission=TASK
     )
     app = App(name="overshoot_demo", root_agent=build_team(), plugins=[governor])
     runner = InMemoryRunner(app=app)

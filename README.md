@@ -39,16 +39,22 @@ proxy hook) would be another ~100-line adapter.
 3. **The meter in the hallway** — identical enforcement, but agents that can
    *see* the remaining budget complete more tasks with fewer speculative
    calls. Meadows' Amsterdam electricity-meter effect, replicated on agents.
+4. **The right of appeal** — a hard wall strands ~7 in-progress tasks (~17k
+   tokens of sunk work wasted); letting a denied agent appeal with a
+   mission-tied justification (granted from a protected tranche, rationed and
+   logged, never touching the completion reserve) rescues nearly all of them
+   — more tasks delivered while spending *less*, same hard cap, zero
+   overshoot. Governed agents get voice, not just compliance.
 
 ## Layout
 
 ```
-src/governor/          core: AtomicLedger, OutputEstimator, QuotaNode
+src/governor/          core: AtomicLedger, OutputEstimator, QuotaNode, AppealsDesk
 src/governor/adk_plugin.py   BudgetGovernorPlugin (ADK 2.x Runner plugin)
 src/governor/mcp_server.py   the same ledger as an MCP server (cross-runtime)
 sim/simulation.py      the three experiments (python sim/simulation.py)
 demo/run_adk_demo.py   live Gemini A/B demo: meter on vs off (needs GOOGLE_API_KEY)
-tests/                 11 unit tests (race exposure, atomicity, lease invariants, MCP)
+tests/                 13 unit tests (races, atomicity, leases, appeals, MCP)
 security/threat_model.md     STRIDE analysis (SKILLSTRIDE methodology)
 docs/                  Kaggle writeup draft + video script
 build_notebook.py      regenerates the Kaggle notebook from these sources
@@ -58,7 +64,7 @@ build_notebook.py      regenerates the Kaggle notebook from these sources
 
 ```bash
 pip install -r requirements.txt
-python -m pytest tests -q      # 11 tests
+python -m pytest tests -q      # 13 tests
 python sim/simulation.py       # runs the 3 experiments, saves figures/
 python demo/run_adk_demo.py    # live ADK demo (set GOOGLE_API_KEY first)
 python -m governor.mcp_server  # governor as MCP server (GOVERNOR_BUDGET env)

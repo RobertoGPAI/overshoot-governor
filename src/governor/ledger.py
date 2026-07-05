@@ -75,23 +75,30 @@ class NaiveLedger:
 class AtomicLedger:
     """Reserve/execute/reconcile ledger with atomic admission.
 
-    available = budget * (1 - reserve_fraction) - spent - committed
+    available = budget * (1 - reserve_fraction - appeal_fraction) - spent - committed
 
     ``try_reserve`` and ``settle`` are the only writers and both run under one
     lock, so admission decisions are never simultaneous even when the LLM
-    calls themselves run in parallel. The ``reserve_fraction`` slice is only
-    admissible once ``begin_finalization()`` is called, guaranteeing there is
-    always budget left to land the mission.
+    calls themselves run in parallel. Two protected tranches sit above the
+    ordinary ceiling:
+
+    - ``appeal_fraction`` is reachable only by *priority* reservations --
+      granted through an AppealsDesk when an agent argues a denied call is
+      critical to the mission (voice, not just compliance).
+    - ``reserve_fraction`` is admissible only once ``begin_finalization()``
+      is called, guaranteeing there is always budget left to land the mission.
     """
 
     def __init__(
         self,
         budget: int,
         reserve_fraction: float = 0.10,
+        appeal_fraction: float = 0.0,
         clock=None,
     ) -> None:
         self.budget = budget
         self.reserve_fraction = reserve_fraction
+        self.appeal_fraction = appeal_fraction
         self.spent = 0
         self.committed = 0
         self.finalizing = False
@@ -105,6 +112,15 @@ class AtomicLedger:
 
     @property
     def usable_budget(self) -> int:
+        """Ceiling for ordinary admissions."""
+        if self.finalizing:
+            return self.budget
+        return int(self.budget * (1.0 - self.reserve_fraction - self.appeal_fraction))
+
+    @property
+    def priority_budget(self) -> int:
+        """Ceiling for appealed (priority) admissions: may enter the appeal
+        tranche, never the completion reserve."""
         if self.finalizing:
             return self.budget
         return int(self.budget * (1.0 - self.reserve_fraction))
@@ -113,13 +129,18 @@ class AtomicLedger:
     def available(self) -> int:
         return self.usable_budget - self.spent - self.committed
 
+    @property
+    def priority_available(self) -> int:
+        return self.priority_budget - self.spent - self.committed
+
     def begin_finalization(self) -> None:
         """Release the completion reserve for landing the mission."""
         self.finalizing = True
 
-    async def try_reserve(self, estimate: int) -> Reservation | None:
+    async def try_reserve(self, estimate: int, priority: bool = False) -> Reservation | None:
         async with self._lock:
-            if estimate > self.available:
+            headroom = self.priority_available if priority else self.available
+            if estimate > headroom:
                 self.stats.denied += 1
                 return None
             self.committed += estimate

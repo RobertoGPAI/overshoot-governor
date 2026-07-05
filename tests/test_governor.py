@@ -8,7 +8,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from governor import AtomicLedger, NaiveLedger, OutputEstimator, QuotaError, QuotaNode
+from governor import (
+    AppealsDesk,
+    AtomicLedger,
+    NaiveLedger,
+    OutputEstimator,
+    QuotaError,
+    QuotaNode,
+)
 
 
 def test_naive_ledger_races_past_budget():
@@ -112,6 +119,39 @@ def test_estimator_converges_to_history_quantile():
         est.update("agent", value)
     assert est.predict("agent") == 900  # p90 of the observed tail
     assert est.predict("other_agent") == 2048  # keys are independent
+
+
+def test_appeal_enters_tranche_but_never_the_reserve():
+    """Ordinary stops at 80%; appeals reach 90%; the last 10% stays locked."""
+
+    async def scenario():
+        ledger = AtomicLedger(budget=1000, reserve_fraction=0.10, appeal_fraction=0.10)
+        desk = AppealsDesk(ledger)
+        r = await ledger.try_reserve(800)  # exactly the ordinary ceiling
+        await ledger.settle(r, 800)
+        assert await ledger.try_reserve(100) is None  # ordinary: denied
+        granted = await desk.appeal("agent", 100, "critical synthesis step")
+        assert granted is not None  # appeal tranche: admitted
+        await ledger.settle(granted, 100)
+        # even an appeal cannot touch the completion reserve
+        assert await desk.appeal("agent", 50, "please") is None
+        assert ledger.overshoot == 0
+
+    asyncio.run(scenario())
+
+
+def test_appeal_requires_justification_and_is_rationed():
+    async def scenario():
+        ledger = AtomicLedger(budget=10_000, reserve_fraction=0.10, appeal_fraction=0.10)
+        desk = AppealsDesk(ledger, max_grants_per_agent=2)
+        assert await desk.appeal("a", 100, "") is None  # no silent overrides
+        assert await desk.appeal("a", 100, "reason 1") is not None
+        assert await desk.appeal("a", 100, "reason 2") is not None
+        assert await desk.appeal("a", 100, "reason 3") is None  # ration exhausted
+        assert await desk.appeal("b", 100, "reason") is not None  # per-agent cap
+        assert desk.log.granted == 3 and desk.log.refused == 2  # accountability
+
+    asyncio.run(scenario())
 
 
 def test_spawn_cascade_self_extinguishes():

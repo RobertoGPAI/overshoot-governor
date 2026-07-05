@@ -15,11 +15,14 @@ place and cannot drift between surfaces:
 Adapters are imported lazily: the core works wherever Python does.
 """
 
+from .appeals import AppealsDesk, AppealsLog
 from .estimator import OutputEstimator
 from .ledger import AtomicLedger, NaiveLedger, Reservation
 from .quota import QuotaError, QuotaNode
 
 __all__ = [
+    "AppealsDesk",
+    "AppealsLog",
     "AtomicLedger",
     "NaiveLedger",
     "Reservation",

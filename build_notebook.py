@@ -33,6 +33,7 @@ def cut_from(source: str, marker: str) -> str:
 ledger_src = read("src/governor/ledger.py")
 estimator_src = read("src/governor/estimator.py")
 quota_src = read("src/governor/quota.py")
+appeals_src = strip_lines(read("src/governor/appeals.py"), ["from .ledger import"])
 
 sim_src = read("sim/simulation.py")
 sim_src = cut_from(sim_src, "def main() -> None:")
@@ -56,6 +57,7 @@ plugin_src = strip_lines(
     plugin_src,
     [
         "from __future__ import annotations",
+        "from .appeals import",
         "from .estimator import",
         "from .ledger import",
     ],
@@ -91,7 +93,7 @@ three ingredients: bursty concurrent calls (growth), the budget (limit), and
 in-flight calls whose cost is unknown until they complete (delay).
 
 This capstone builds a **budget governor** for an ADK 2.0 multi-agent system and
-evaluates it with three seeded simulation experiments plus a live ADK demo.
+evaluates it with four seeded simulation experiments plus a live ADK demo.
 The design is organized deliberately as a walk *up* Meadows' ladder of
 [leverage points](https://donellameadows.org/archives/leverage-points-places-to-intervene-in-a-system/),
 from the weakest intervention (tweak a parameter) to the strong ones
@@ -104,9 +106,9 @@ from the weakest intervention (tweak a parameter) to the strong ones
 | Reserve/reconcile accounting of in-flight calls | **#9** — lengths of delays |
 | Atomic admission ledger nobody can race past | **#8** — strength of balancing feedback loops |
 | Lease-inherited quotas that damp subagent spawning | **#7** — gain of reinforcing loops |
-| Live budget state injected into each agent's context | **#6** — structure of information flows |
-| Admission protocol and lease semantics | **#5** — rules of the system |
-| "Never endanger the mission to save tokens" | **#3** — the goal of the system |
+| Live budget state + the overall mission injected into each agent's context | **#6** — structure of information flows |
+| Admission protocol, lease semantics, and a **right of appeal** against denials | **#5** — rules of the system |
+| "Never endanger the mission to save tokens" — appeals argue *from* the mission | **#3** — the goal of the system |
 
 **Related work.** LLM gateways and load balancers (e.g. Cordon, LiteLLM router,
 provider-side rate limits) distribute traffic across endpoints for latency and
@@ -146,6 +148,14 @@ carves the child's allocation *out of the parent's remaining lease*, so
 root no matter how deep the spawn tree grows. Decisions are purely local (no
 lock, no contention): the agent *knows when to stop by itself*. Closing a node
 returns unspent quota to the parent.
+
+**Appeals desk** — a denial is a contestable administrative act, not a wall.
+A denied agent may appeal by stating why the call is critical to the overall
+mission (which every agent carries in its context, next to its own task); a
+granted appeal admits the call into a protected *appeal tranche* — never into
+the completion reserve. Appeals are rationed per agent and logged with their
+justifications. In Hirschman's terms, governed agents get *voice*, not just
+compliance.
 """
 
 EXP1_MD = """\
@@ -216,8 +226,36 @@ constraint is part of what it perceives rather than a wall it discovers by
 hitting it. The meter in the hallway works for agents too.
 """
 
+EXP4_MD = """\
+## 5 · Experiment 4 — the right of appeal (leverage point #5 serving #3)
+
+A hard limit that cannot be contested strands work: a task denied at its
+final synthesis call wastes everything already spent on it. But if agents can
+override limits freely, the limit is fiction. The democratic answer is due
+process: a denied agent may **appeal** — one line stating why finishing this
+task protects the mission — and a granted appeal covers the rest of that task
+from a protected tranche (85–95% of budget) that ordinary admission can never
+touch. The completion reserve stays inviolable; appeals are rationed (2 per
+agent) and logged with their justifications.
+
+Both conditions below face the same hard cap. The difference is whether the
+wall can hear reasons.
+"""
+
+EXP4_READ_MD = """\
+**Reading the results.** Same ceiling, zero overshoot in both conditions —
+but the hard wall strands ~6 tasks (~17k tokens of sunk work wasted), while
+the appeals condition strands almost none, completes *more* tasks, and spends
+*less* overall: ordinary admission stops earlier (85%), and the protected
+tranche is used surgically, only where sunk cost justifies it. A handful of
+granted appeals buys back nearly all the stranded value. The rule (#5) works
+better because it answers to the goal (#3): the agent "compels itself not to
+act" except when acting is precisely what protects the mission — and then it
+gets to say so.
+"""
+
 ADK_MD = """\
-## 5 · The governor as an ADK 2.0 Runner plugin
+## 6 · The governor as an ADK 2.0 Runner plugin
 
 In ADK 2.x, a **plugin registered on the Runner** applies its callbacks to every
 LLM call of *every agent and subagent* — exactly the semantics a governor needs
@@ -227,8 +265,11 @@ cannot). The implementation below is the actual repo module:
 - `before_model_callback` — counts the deterministic input side, adds the p90
   output estimate, and **atomically reserves** against the shared ledger. If
   denied, it returns a refusal `LlmResponse`, which short-circuits ADK's flow:
-  *the model is never called*. If admitted and `visibility=True`, it appends
-  the live budget state to the request's system instruction (the meter).
+  *the model is never called* — but the refusal states the right of appeal,
+  and a retry carrying `APPEAL: <reason>` is routed through the AppealsDesk.
+  If admitted and `visibility=True`, it appends the live budget state **and
+  the overall mission** to the request's system instruction (the meter), so
+  restraint and appeals alike can be weighed against the goal they serve.
 - `after_model_callback` — reconciles the reservation with the actual
   `usage_metadata` and feeds the estimator.
 - `on_model_error_callback` — cancels the reservation so failures don't leak
@@ -249,7 +290,7 @@ runner = InMemoryRunner(app=app)
 """
 
 SECURITY_MD = """\
-## 6 · Security: the governor *is* the mitigation
+## 7 · Security: the governor *is* the mitigation
 
 The project treats unbounded token spend as a security problem, not just a cost
 problem, and was analyzed with [SKILLSTRIDE](https://github.com/RobertoGPAI/SKILLSTRIDE),
@@ -271,7 +312,7 @@ push.
 """
 
 CLOSING_MD = """\
-## 7 · Limitations and future work
+## 8 · Limitations and future work
 
 - **Single-process ledger.** `asyncio.Lock` serializes admission inside one
   Runner. Multiple runners need a shared atomic ledger (e.g. Redis `INCRBY`
@@ -288,7 +329,7 @@ CLOSING_MD = """\
   A/B with live Gemini calls; scaling it to significance is the natural next
   study: *does telling an LLM agent its remaining budget change its behavior?*
 
-## 8 · Conclusion
+## 9 · Conclusion
 
 A token budget in a multi-agent system is a stock with delayed outflow
 feedback, and it fails the way Meadows said such systems fail: overshoot from
@@ -319,6 +360,7 @@ cells = [
     nbf.v4.new_code_cell(ledger_src),
     nbf.v4.new_code_cell(estimator_src),
     nbf.v4.new_code_cell(quota_src),
+    nbf.v4.new_code_cell(appeals_src),
     nbf.v4.new_code_cell(sim_src),
     nbf.v4.new_markdown_cell(EXP1_MD),
     nbf.v4.new_code_cell(
@@ -341,6 +383,13 @@ cells = [
         "plot_meter(results3, FIGDIR)"
     ),
     nbf.v4.new_markdown_cell(EXP3_READ_MD),
+    nbf.v4.new_markdown_cell(EXP4_MD),
+    nbf.v4.new_code_cell(
+        "results4 = await run_experiment_appeals_async()\n"
+        "print_appeals(results4)\n"
+        "plot_appeals(results4, FIGDIR)"
+    ),
+    nbf.v4.new_markdown_cell(EXP4_READ_MD),
     nbf.v4.new_markdown_cell(ADK_MD),
     nbf.v4.new_code_cell(plugin_guarded),
     nbf.v4.new_markdown_cell(SECURITY_MD),

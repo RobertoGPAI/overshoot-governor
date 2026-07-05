@@ -29,9 +29,9 @@ Fifty years ago, Donella Meadows showed (*The Limits to Growth*, *Thinking in Sy
 | Reserve/reconcile accounting of in-flight calls | #9 — lengths of delays |
 | Atomic admission ledger nobody can race past | #8 — balancing feedback loops |
 | Lease-inherited quotas that damp spawning | #7 — reinforcing-loop gain |
-| Live budget state injected into agent context | #6 — information flows |
-| Admission protocol and lease semantics | #5 — rules |
-| "Never endanger the mission to save tokens" | #3 — system goal |
+| Budget state + overall mission injected into agent context | #6 — information flows |
+| Admission protocol, leases, and a **right of appeal** | #5 — rules |
+| "Never endanger the mission" — appeals argue *from* the mission | #3 — system goal |
 
 **Architecture** (see cover image). The design is deliberately *one policy core, two adapters*: the governor core (ledger, estimator, quota tree) is a framework-agnostic policy engine — pure Python, no I/O, fully unit-testable — and both the ADK plugin and the MCP server are thin adapters over the same ledger, so enforcement semantics live in one place and cannot drift between surfaces. A team of ADK `LlmAgent`s (coordinator → researcher, writer) runs under a Runner. The governor is a **Runner plugin** — registered once, its callbacks cover every LLM call of every agent *and every spawned subagent*, which is exactly the semantics a governor needs: a per-agent callback could be bypassed by a spawned child; a Runner plugin cannot.
 
@@ -39,14 +39,15 @@ Fifty years ago, Donella Meadows showed (*The Limits to Growth*, *Thinking in Sy
 - `after_model_callback` **reconciles** the reservation with the actual `usage_metadata` and feeds the estimator. In-flight cost is never invisible: the controlled quantity is `spent + committed`, not `spent`.
 - A **completion reserve** (10%) is admissible only after `begin_finalization()` — the mission can always afford to land.
 - **Quota lease tree:** a subagent never gets budget from the global pool; `spawn_child()` carves its allocation out of the parent's remainder, so `Σ children ≤ parent` holds at every node. Spawning — a reinforcing loop — has its gain capped: cascades decay geometrically and self-extinguish. Closing a node returns unspent quota to its parent.
-- **The meter in the hallway:** optionally, the plugin appends the live budget state to each request's system instruction, so agents can economize *before* hitting the wall.
+- **The meter in the hallway:** optionally, the plugin appends the live budget state — *and the overall mission* — to each request's system instruction, next to the agent's own task, so agents can economize *before* hitting the wall and weigh every action against the goal their restraint must serve.
+- **The right of appeal:** a denial is a contestable administrative act, not a wall. The refusal message states the right of appeal; a retry carrying `APPEAL: <reason tied to the mission>` is heard by an AppealsDesk that may admit the call into a protected *appeal tranche* (ordinary admission can never touch it; the completion reserve stays inviolable). Appeals are rationed per agent and logged with their justifications — governed agents get voice, not just compliance.
 - An **MCP server** exposes the same ledger (`reserve` / `settle` / `budget_status` / `begin_finalization`) over the standard protocol, so mixed fleets — ADK teams, Claude Code sessions, CI scripts — share one budget: cross-runtime governance.
 
 **How do you know the cost before it happens?** You split it. Input tokens are deterministic — countable pre-call. Output tokens are not, so the estimator keeps a rolling per-agent history of actual outputs (fed at settle time) and reserves the p90; estimation error is absorbed by the soft-limit buffer and corrected at reconciliation. Setting `max_output_tokens` to the remaining allocation turns the estimate into a hard guarantee.
 
-### The evidence: three seeded experiments
+### The evidence: four seeded experiments
 
-All three run in the submitted notebook/repo in seconds, with real `asyncio` concurrency (real in-flight windows).
+All four run in the submitted notebook/repo in seconds, with real `asyncio` concurrency (real in-flight windows).
 
 **Experiment 1 — concurrent admission.** Sixteen agents with uneven demand fire concurrently at a 150k-token budget under four regimes. The naive check-then-act baseline overshoots **~13%** — and the timeline shows *why*: spend crosses the budget line while a whole wave of admitted calls is still in flight. Meadows' delay ingredient, isolated. Both atomic regimes (worst-case and p90 reservations) hit **0% overshoot** at ~89% utilization. The decentralized quota tree also never overshoots and almost never has to say "no" (one local denial per agent vs. ~48 central denials) but pays in utilization (78%): a static even split strands quota with light agents. The finding in one line: **exactness costs coordination; autonomy costs utilization** — so we ship both, ledger as hard guarantee, leases as the contention-free fast path.
 
@@ -54,11 +55,13 @@ All three run in the submitted notebook/repo in seconds, with real `asyncio` con
 
 **Experiment 3 — the meter in the hallway.** Meadows' canonical example for information flows: identical Amsterdam houses used ~30% less electricity when the meter was in the hallway instead of the basement. We replicate the structure with agents: identical teams, identical tasks, identical hard enforcement; the only difference is whether agents *see* the remaining budget (and damp speculative calls with scarcity). Blind: 15 tasks completed, 30 speculative calls. Sighted: **20 tasks, 16 speculative calls** — a third more delivered value from the same budget, funded by information rather than enforcement. The repo includes a live A/B (`demo/run_adk_demo.py`) running the same comparison over real Gemini calls.
 
-The answer to the design question that started this project — *how does an agent compel itself not to act, as long as the overall goal is not endangered?* — turns out to be layered: the goal is protected by the completion reserve (#11), restraint is made rational by putting the constraint into the agent's information flow (#6), and the ledger (#8) stays as the guarantee nobody can talk their way past.
+**Experiment 4 — the right of appeal.** A limit that cannot be contested strands work: a task denied mid-way wastes everything already sunk into it. Both conditions here face the same hard cap; the difference is whether the wall can hear reasons. The hard wall completes 14 tasks, strands 7, and wastes ~17k tokens of sunk work. With appeals — a denied agent may state why finishing its in-progress task protects the mission, and a granted appeal covers that task from the protected tranche — the system completes **15 tasks, strands 1, wastes ~5k**, and spends *less* overall, because ordinary admission stops earlier and the protected tranche is used surgically, only where sunk cost justifies it. Zero overshoot in both. Five granted appeals buy back nearly all the stranded value: the rule works better because it answers to the goal.
+
+The answer to the design question that started this project — *how does an agent compel itself not to act, as long as the overall goal is not endangered?* — turns out to be layered like a polity: the goal is protected by the completion reserve (#11), restraint is made rational by putting the constraint and the mission into the agent's information flow (#6), due process turns denials into contestable acts rather than walls (#5 serving #3), and the ledger (#8) stays as the guarantee nobody can talk their way past. Enforcement, information, and voice — law, transparency, and due process. The agent is governed the way citizens are, not the way resources are.
 
 ### Security: the governor *is* the mitigation
 
-Unbounded token spend is a security problem, not just a cost problem. The repo was threat-modeled with **[SKILLSTRIDE](https://github.com/RobertoGPAI/SKILLSTRIDE)**, our STRIDE-methodology agent skill (full `security/threat_model.md` in the repo): prompt-injection-driven budget drain and spawn cascades are **Denial-of-Service on the wallet**, mitigated by the atomic ledger and the lease tree; subagents escaping limits is **Elevation of Privilege**, mitigated by the Runner-level plugin plus the lease invariant; the enforcement channel never trusts model-generated text (the visibility string is advisory only — hard limits hold even if an attacker spoofs governor messages). Repo hygiene follows the course's security lessons: **pre-commit** hooks (ruff, private-key detection) and a **Semgrep CI workflow** (`p/python`, `p/security-audit`) on every push. No keys in code; the demo reads `GOOGLE_API_KEY` from the environment.
+Unbounded token spend is a security problem, not just a cost problem. The repo was threat-modeled with **[SKILLSTRIDE](https://github.com/RobertoGPAI/SKILLSTRIDE)**, our STRIDE-methodology agent skill (full `security/threat_model.md` in the repo): prompt-injection-driven budget drain and spawn cascades are **Denial-of-Service on the wallet**, mitigated by the atomic ledger and the lease tree; subagents escaping limits is **Elevation of Privilege**, mitigated by the Runner-level plugin plus the lease invariant; the enforcement channel never trusts model-generated text (the visibility string is advisory only — hard limits hold even if an attacker spoofs governor messages). The appeal channel is designed against abuse: appeals are rationed per agent, the tranche is bounded and never touches the completion reserve, and every appeal — granted or refused — is logged with its justification. Repo hygiene follows the course's security lessons: **pre-commit** hooks (ruff, private-key detection) and a **Semgrep CI workflow** (`p/python`, `p/security-audit`) on every push. No keys in code; the demo reads `GOOGLE_API_KEY` from the environment.
 
 ### Course concepts demonstrated
 
@@ -72,7 +75,7 @@ Unbounded token spend is a security problem, not just a cost problem. The repo w
 
 ### The build
 
-The project was vibe-coded in a day with Claude Code against the installed ADK 2.3 package (callback signatures verified against source, not docs), test-first where it mattered: 11 unit tests pin the properties the whole argument rests on — the naive ledger *provably* races past the budget in a test, the atomic ledger provably cannot, lease invariants hold, cascades self-extinguish, reservations reconcile. The simulation layer is dependency-free (numpy + asyncio), so every figure in this writeup reproduces from a clean clone in under a minute: `pytest && python sim/simulation.py`.
+The project was vibe-coded in a day with Claude Code against the installed ADK 2.3 package (callback signatures verified against source, not docs), test-first where it mattered: 13 unit tests pin the properties the whole argument rests on — the naive ledger *provably* races past the budget in a test, the atomic ledger provably cannot, lease invariants hold, cascades self-extinguish, reservations reconcile, appeals are rationed and can never touch the completion reserve. The simulation layer is dependency-free (numpy + asyncio), so every figure in this writeup reproduces from a clean clone in under a minute: `pytest && python sim/simulation.py`.
 
 ### Limitations and what's next
 
@@ -80,4 +83,4 @@ The `asyncio` ledger serializes admission within one process; multi-runner fleet
 
 **Repo:** github.com/RobertoGPAI/overshoot-governor (tests, simulations, executed notebook, threat model, live demo). **Video:** attached.
 
-*Word count: ~1,600 (limit 2,500).*
+*Word count: ~2,000 (limit 2,500).*

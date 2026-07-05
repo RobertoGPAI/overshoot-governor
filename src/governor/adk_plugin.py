@@ -14,8 +14,16 @@ Two intervention levels, deliberately at different Meadows leverage points:
   the actual usage_metadata and feeds the estimator.
 
 - Information flow (#6, the meter in the hallway): when ``visibility`` is on,
-  the plugin appends the live budget state to the system instruction of every
-  outgoing request, so the agent can economize *before* hitting the wall.
+  the plugin appends the live budget state -- and the overall ``mission`` --
+  to the system instruction of every outgoing request, so the agent can
+  economize *before* hitting the wall, and can weigh restraint against the
+  goal its restraint must serve (#3).
+
+- Voice (#5 rules in service of #3 goals): a denial is a contestable act, not
+  a wall. The denied agent may reply 'APPEAL: <reason tied to the mission>'
+  and retry once; the AppealsDesk may admit it into the protected appeal
+  tranche. Rationed, logged, and never at the expense of the completion
+  reserve.
 """
 
 from __future__ import annotations
@@ -29,13 +37,19 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
+from .appeals import AppealsDesk
 from .estimator import OutputEstimator
 from .ledger import AtomicLedger, Reservation
+
+APPEAL_MARKER = "APPEAL:"
 
 DENIAL_TEXT = (
     "[BUDGET GOVERNOR] This model call was not admitted: the projected token "
     "cost exceeds the remaining budget. Wrap up with the information you "
-    "already have. Do not start new tool calls or spawn new agents."
+    "already have. Do not start new tool calls or spawn new agents. "
+    "Right of appeal: if THIS call is on the critical path to the overall "
+    f"mission, reply with a single line '{APPEAL_MARKER} <one-line reason tied "
+    "to the mission>' and retry once. Appeals are logged and rationed."
 )
 
 
@@ -70,15 +84,32 @@ class BudgetGovernorPlugin(BasePlugin):
         self,
         budget: int,
         reserve_fraction: float = 0.10,
+        appeal_fraction: float = 0.05,
         visibility: bool = True,
+        mission: str | None = None,
         estimator: OutputEstimator | None = None,
         name: str = "budget_governor",
     ) -> None:
         super().__init__(name=name)
-        self.ledger = AtomicLedger(budget=budget, reserve_fraction=reserve_fraction)
+        self.ledger = AtomicLedger(
+            budget=budget,
+            reserve_fraction=reserve_fraction,
+            appeal_fraction=appeal_fraction,
+        )
+        self.appeals = AppealsDesk(self.ledger)
         self.estimator = estimator or OutputEstimator()
         self.visibility = visibility
+        self.mission = mission
         self._pending: dict[str, list[tuple[Reservation, str]]] = defaultdict(list)
+
+    @staticmethod
+    def _extract_appeal(llm_request: LlmRequest) -> str | None:
+        """A one-line 'APPEAL: <reason>' in the latest turn is a filed appeal."""
+        for content in reversed((llm_request.contents or [])[-2:]):
+            for part in content.parts or []:
+                if part.text and APPEAL_MARKER in part.text:
+                    return part.text.split(APPEAL_MARKER, 1)[1].strip().splitlines()[0]
+        return None
 
     async def before_model_callback(
         self, *, callback_context: CallbackContext, llm_request: LlmRequest
@@ -88,8 +119,14 @@ class BudgetGovernorPlugin(BasePlugin):
 
         reservation = await self.ledger.try_reserve(estimate)
         if reservation is None:
+            # Right of appeal (voice): a justified retry may enter the appeal
+            # tranche -- never the completion reserve. Rationed and logged.
+            justification = self._extract_appeal(llm_request)
+            if justification:
+                reservation = await self.appeals.appeal(key, estimate, justification)
+        if reservation is None:
             # Short-circuit: the model is never called. The refusal text tells
-            # the agent to land with what it has instead of retrying.
+            # the agent to land with what it has, or appeal once with cause.
             return LlmResponse(
                 content=types.Content(
                     role="model", parts=[types.Part(text=DENIAL_TEXT)]
@@ -99,13 +136,21 @@ class BudgetGovernorPlugin(BasePlugin):
         self._pending[callback_context.invocation_id].append((reservation, key))
 
         if self.visibility:
+            mission_line = (
+                f"Overall mission (the goal your restraint must serve): {self.mission}. "
+                if self.mission
+                else ""
+            )
             llm_request.append_instructions([
-                "[BUDGET GOVERNOR] Live budget state: "
+                "[BUDGET GOVERNOR] " + mission_line + "Live budget state: "
                 f"{self.ledger.available} tokens available, "
                 f"{self.ledger.committed} committed to in-flight calls, "
                 f"{self.ledger.spent} already spent of {self.ledger.budget}. "
                 "Be economical: prefer short answers, avoid speculative tool "
-                "calls, and do not spawn subagents unless strictly necessary."
+                "calls, and do not spawn subagents unless strictly necessary. "
+                "Forgo any action that does not serve the mission; if a "
+                "critical call is denied, you may appeal with "
+                f"'{APPEAL_MARKER} <reason>'."
             ])
         return None
 
@@ -145,5 +190,7 @@ class BudgetGovernorPlugin(BasePlugin):
         return (
             f"budget={led.budget} spent={led.spent} committed={led.committed} "
             f"available={led.available} overshoot={led.overshoot} "
-            f"admitted={led.stats.admitted} denied={led.stats.denied}"
+            f"admitted={led.stats.admitted} denied={led.stats.denied} "
+            f"appeals_granted={self.appeals.log.granted} "
+            f"appeals_refused={self.appeals.log.refused}"
         )
