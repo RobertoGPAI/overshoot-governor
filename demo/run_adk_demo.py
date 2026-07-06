@@ -64,10 +64,18 @@ def build_team() -> LlmAgent:
     )
 
 
-async def run_once(budget: int, visibility: bool) -> BudgetGovernorPlugin:
+async def run_once(
+    budget: int,
+    visibility: bool,
+    *,
+    reserve_fraction: float = 0.10,
+    appeal_fraction: float = 0.05,
+    appeal_round: bool = False,
+) -> BudgetGovernorPlugin:
     governor = BudgetGovernorPlugin(
         budget=budget,
-        reserve_fraction=0.10,
+        reserve_fraction=reserve_fraction,
+        appeal_fraction=appeal_fraction,
         visibility=visibility,
         mission=TASK,
         arbiter=True,  # appeals heard by a budgeted judge agent, not the coordinator
@@ -77,26 +85,76 @@ async def run_once(budget: int, visibility: bool) -> BudgetGovernorPlugin:
     session = await runner.session_service.create_session(
         app_name="overshoot_demo", user_id="capstone"
     )
-    message = types.Content(role="user", parts=[types.Part(text=TASK)])
-    async for event in runner.run_async(
-        user_id="capstone", session_id=session.id, new_message=message
-    ):
-        if event.content and event.content.parts and event.content.parts[0].text:
-            preview = event.content.parts[0].text.strip().replace("\n", " ")[:110]
-            print(f"  [{event.author}] {preview}")
+
+    async def send(text: str) -> None:
+        message = types.Content(role="user", parts=[types.Part(text=text)])
+        async for event in runner.run_async(
+            user_id="capstone", session_id=session.id, new_message=message
+        ):
+            if event.content and event.content.parts and event.content.parts[0].text:
+                preview = event.content.parts[0].text.strip().replace("\n", " ")[:110]
+                print(f"  [{event.author}] {preview}")
+
+    await send(TASK)
+
+    # A denial silences its addressee: the refusal short-circuits the model
+    # call, so the denied agent never hears the verdict -- to appeal it would
+    # need the very call it was denied. The driver therefore acts as public
+    # prosecutor (fiscalia), filing the appeal ex officio on the mission's
+    # behalf, not the agent's; the AppealsDesk + MissionJudge then decide.
+    if appeal_round and governor.ledger.stats.denied:
+        print("  -- denial detected; filing an appeal and retrying --")
+        await send(
+            "APPEAL: the final deliverable (the 3-paragraph summary) has not "
+            "been produced; this call is required to land the mission."
+        )
     return governor
 
 
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--budget", type=int, default=20_000)
+    parser.add_argument(
+        "--appeal-demo",
+        action="store_true",
+        help="single run tuned so the budget bites mid-mission, then an appeal "
+        "is filed and heard by the MissionJudge (uses --budget, default 12000)",
+    )
     args = parser.parse_args()
 
-    if not os.environ.get("GOOGLE_API_KEY"):
+    # AI Studio and most tutorials call it GEMINI_API_KEY; the google-genai SDK
+    # accepts either name. Accept both so the demo runs whichever you set.
+    if not (os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")):
         sys.exit(
-            "GOOGLE_API_KEY is not set. Get a key at https://aistudio.google.com/ "
-            "and run:  set GOOGLE_API_KEY=...  (or export on Linux/Kaggle)."
+            "No API key found. Set GEMINI_API_KEY (or GOOGLE_API_KEY). "
+            "Get a free key at https://aistudio.google.com/apikey and run:  "
+            "export GEMINI_API_KEY=...  (Linux/WSL/Kaggle)."
         )
+
+    if args.appeal_demo:
+        # Fractions tuned so the ordinary ceiling bites before the task ends
+        # (~3.5k tokens) while the appeal tranche can still afford a hearing
+        # (400) plus the appealed call. Ceilings: ordinary 30%, +25% appeals,
+        # 45% completion reserve.
+        budget = args.budget if args.budget != 20_000 else 12_000
+        print(f"=== Appeal demo: budget {budget}, ordinary ceiling {int(budget * 0.30)} ===")
+        gov = await run_once(
+            budget,
+            visibility=True,
+            reserve_fraction=0.45,
+            appeal_fraction=0.25,
+            appeal_round=True,
+        )
+        print("ledger:", gov.report())
+        for rec in gov.appeals.log.records:
+            verdict = "GRANTED" if rec.granted else "REFUSED"
+            print(f"appeal [{verdict}] {rec.agent}: {rec.justification!r}")
+        if gov.judge:
+            print(
+                f"judge: {gov.judge.hearings} hearing(s), "
+                f"{gov.judge.hearing_tokens} tokens spent on justice"
+            )
+        return
 
     print(f"=== Condition A: blind (no meter), budget {args.budget} tokens ===")
     blind = await run_once(args.budget, visibility=False)

@@ -48,7 +48,8 @@ GRANT or REFUSE."""
 
 def genai_caller(model: str = "gemini-2.5-flash") -> Caller | None:
     """Default caller backed by google.genai; None when no API key is set."""
-    if not os.environ.get("GOOGLE_API_KEY"):
+    # google-genai reads either name; AI Studio tutorials use GEMINI_API_KEY.
+    if not (os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")):
         return None
     from google import genai
 

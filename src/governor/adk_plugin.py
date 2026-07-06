@@ -116,11 +116,20 @@ class BudgetGovernorPlugin(BasePlugin):
 
     @staticmethod
     def _extract_appeal(llm_request: LlmRequest) -> str | None:
-        """A one-line 'APPEAL: <reason>' in the latest turn is a filed appeal."""
+        """A line starting with 'APPEAL: <reason>' in the latest turn is a filed appeal.
+
+        Line-anchored on purpose: the governor's own DENIAL_TEXT mentions the
+        marker mid-sentence when explaining the right of appeal, and quoting
+        the rules must not count as invoking them.
+        """
         for content in reversed((llm_request.contents or [])[-2:]):
             for part in content.parts or []:
-                if part.text and APPEAL_MARKER in part.text:
-                    return part.text.split(APPEAL_MARKER, 1)[1].strip().splitlines()[0]
+                if not part.text:
+                    continue
+                for line in part.text.splitlines():
+                    line = line.strip()
+                    if line.startswith(APPEAL_MARKER):
+                        return line[len(APPEAL_MARKER):].strip()
         return None
 
     async def before_model_callback(

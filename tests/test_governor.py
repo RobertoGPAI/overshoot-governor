@@ -176,8 +176,13 @@ def test_judge_rules_and_the_hearing_is_billed():
     asyncio.run(scenario())
 
 
-def test_judge_abstains_offline_and_refuses_when_broke():
+def test_judge_abstains_offline_and_refuses_when_broke(monkeypatch):
     from governor import MissionJudge
+
+    # caller=None means "auto-detect from the environment"; strip any real API
+    # keys so the test exercises the offline path instead of calling Gemini.
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
     async def scenario():
         ledger = AtomicLedger(budget=1000, reserve_fraction=0.0, appeal_fraction=0.0)

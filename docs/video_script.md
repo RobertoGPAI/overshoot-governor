@@ -2,7 +2,7 @@
 
 > Graba pantalla + voz. Narración sugerida en inglés (los jueces evalúan en
 > inglés); debajo de cada bloque tienes la idea en español por si prefieres
-> locutar en español con subtítulos en inglés. Total apuntado: ~4:50.
+> locutar en español con subtítulos en inglés. Total apuntado: ~4:55.
 
 ---
 
@@ -72,29 +72,36 @@ los dos reports del ledger (blind vs sighted).
 
 *En pantalla: fig4 → demo en vivo o captura del output del demo.*
 
-## 3:20–3:50 — The right of appeal (el "wow")
+## 3:20–4:00 — The right of appeal (el "wow")
 
 **EN:** "One last mechanism, because a wall that can't be contested strands
 work: a task denied at its final step wastes everything already spent on it.
-So denials carry a right of appeal. A denied agent can state — in one line —
-why finishing its task protects the overall mission, which every agent
-carries in its context. Granted appeals draw from a protected tranche,
-rationed and logged, never from the completion reserve. Appeals can even be
+So denials carry a right of appeal. Granted appeals draw from a protected
+tranche, rationed and logged, never from the completion reserve. They're
 heard by a judge agent — deliberately not the coordinator that allocates the
 quotas, because nobody should be judge in their own cause — and the hearing
 itself is billed to the same ledger: justice isn't free, so appeal spam
-exhausts the hearing budget, never the mission's. Result: same hard cap,
-zero overshoot, one more task delivered, seven times less stranded work —
-while spending less. Enforcement, information, and voice: the agent is
-governed the way citizens are, not the way resources are."
+exhausts the hearing budget, never the mission's. And running this live
+exposed a subtlety I love: a denial *silences* its addressee. The refusal
+short-circuits the model call, so the denied agent never actually hears the
+verdict — to appeal it would need the very call it was just denied. So the
+appeal is filed *ex officio*, the way a public prosecutor speaks for a party
+that cannot speak: the driver — or a parent agent — appeals on the mission's
+behalf, not the agent's. Watch: the budget bites mid-mission, the appeal is
+filed, the judge grants it, and the writer lands the mission from the
+protected tranche. Same hard cap, zero overshoot, seven times less stranded
+work — while spending less. Enforcement, information, and voice: the agent
+is governed the way citizens are, not the way resources are."
 
-**ES:** Muestra fig5 y la tabla del Exp. 4; señala "appeals granted" y
-"wasted tokens".
+**ES:** Muestra fig5 y la tabla del Exp. 4; luego el demo en vivo
+`python demo/run_adk_demo.py --appeal-demo` — señala la línea
+"denial detected; filing an appeal", el `appeal [GRANTED]` y el coste de la
+audiencia ("tokens spent on justice").
 
-*En pantalla: fig5_appeals.png → el DENIAL_TEXT con el 'APPEAL:' en el
-código del plugin.*
+*En pantalla: fig5_appeals.png → terminal con --appeal-demo (denegación →
+apelación → GRANTED → misión aterrizada) → el DENIAL_TEXT en el código.*
 
-## 3:50–4:20 — Security (concepto del curso)
+## 4:00–4:25 — Security (concepto del curso)
 
 **EN:** "Unbounded token spend is a security problem: denial of service on
 the wallet. The repo is threat-modeled with SKILLSTRIDE, our STRIDE skill for
@@ -109,7 +116,7 @@ workflow de Semgrep; menciona SKILLSTRIDE con tu repo en pantalla.
 *En pantalla: threat_model.md scrolleando → workflow security.yml → (badge CI
 si ya hiciste push).*
 
-## 4:20–4:50 — The build + deployability + close
+## 4:25–4:55 — The build + deployability + close
 
 **EN:** "Thirteen unit tests pin the claims — the naive ledger provably races
 in a test; the atomic one provably can't. Everything reproduces from a clean
