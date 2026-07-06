@@ -117,9 +117,13 @@ async def run_once(
     # behalf, not the agent's; the AppealsDesk + MissionJudge then decide.
     if appeal_round and governor.ledger.stats.denied:
         print("  -- denial detected; filing an appeal and retrying --")
+        # The plea must be forward-looking (marginal value vs marginal cost):
+        # the ruling prompt instructs the judge to reject sunk-cost reasoning,
+        # and "we already spent so much" pleas get refused -- correctly.
         await send(
-            "APPEAL: the final deliverable (the 3-paragraph summary) has not "
-            "been produced; this call is required to land the mission."
+            "APPEAL: granting this single call produces the mission's entire "
+            "deliverable (the 3-paragraph summary); refusing it means the "
+            "mission returns nothing at all."
         )
     return governor
 
@@ -154,11 +158,12 @@ async def main() -> None:
         )
 
     if args.appeal_demo:
-        # Fractions tuned so the ordinary ceiling bites before the task ends
-        # (~3.5k tokens) while the appeal tranche can still afford a hearing
-        # (400) plus the appealed call. Ceilings: ordinary 30%, +25% appeals,
-        # 45% completion reserve.
-        budget = args.budget if args.budget != 20_000 else 12_000
+        # Ceilings tuned so the ordinary tranche affords roughly ONE call (a
+        # fresh reservation is ~input + the 1024-token p90 prior): the first
+        # call is admitted, the next is denied mid-mission, and the appeal
+        # tranche can still afford the hearing (400) plus the appealed call.
+        # Ordinary 30%, appeals 25%, completion reserve 45%.
+        budget = args.budget if args.budget != 20_000 else 5_000
         print(f"=== Appeal demo: budget {budget}, ordinary ceiling {int(budget * 0.30)} ===")
         gov = await run_once(
             budget,
@@ -176,6 +181,12 @@ async def main() -> None:
                 f"judge: {gov.judge.hearings} hearing(s), "
                 f"{gov.judge.hearing_tokens} tokens spent on justice"
             )
+            if gov.judge.hearing_failures:
+                print(
+                    f"judge: {gov.judge.hearing_failures} FAILED hearing(s) -- "
+                    f"last error: {type(gov.judge.last_error).__name__}: "
+                    f"{str(gov.judge.last_error)[:140]}"
+                )
         return
 
     print(f"=== Condition A: blind (no meter), budget {args.budget} tokens ===")

@@ -22,6 +22,7 @@ upgrade, not a dependency.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Awaitable, Callable
 
@@ -59,13 +60,23 @@ def genai_caller(model: str | None = None) -> Caller | None:
         return None
     model = model or os.environ.get("GOVERNOR_JUDGE_MODEL", "gemini-2.5-flash")
     from google import genai
+    from google.genai import errors as genai_errors
 
     client = genai.Client()
 
     async def call(prompt: str) -> tuple[str, int]:
-        response = await client.aio.models.generate_content(
-            model=model, contents=prompt
-        )
+        # A transient 5xx must not decide a case: the hearing is one cheap
+        # request, so retry briefly before failing closed as usual.
+        for attempt in (1, 2, 3):
+            try:
+                response = await client.aio.models.generate_content(
+                    model=model, contents=prompt
+                )
+                break
+            except genai_errors.ServerError:
+                if attempt == 3:
+                    raise
+                await asyncio.sleep(attempt)
         used = 0
         if response.usage_metadata and response.usage_metadata.total_token_count:
             used = response.usage_metadata.total_token_count
@@ -90,6 +101,8 @@ class MissionJudge:
         self.hearing_estimate = hearing_estimate
         self.hearings = 0
         self.hearing_tokens = 0
+        self.hearing_failures = 0
+        self.last_error: Exception | None = None
 
     async def rule(self, agent: str, estimate: int, justification: str) -> bool:
         if self.caller is None:
@@ -112,7 +125,9 @@ class MissionJudge:
                     justification=justification,
                 )
             )
-        except Exception:
+        except Exception as exc:
+            self.hearing_failures += 1
+            self.last_error = exc
             await self.ledger.cancel(reservation)
             return False  # a hearing that fails grants nothing
 
