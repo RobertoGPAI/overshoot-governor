@@ -1,7 +1,7 @@
 [project]
 name = "overshoot-governor"
 version = "0.1.0"
-description = "Token-budget admission control for multi-agent systems (ADK 2.0), designed with Donella Meadows"
+description = "Token-budget admission control for multi-agent systems (ADK 2.0), built on Donella Meadows' leverage points"
 requires-python = ">=3.11"
 
 [tool.ruff]
