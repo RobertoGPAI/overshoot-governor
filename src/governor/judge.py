@@ -46,11 +46,18 @@ incurred is not a reason (sunk cost). Answer with exactly one word: \
 GRANT or REFUSE."""
 
 
-def genai_caller(model: str = "gemini-2.5-flash") -> Caller | None:
-    """Default caller backed by google.genai; None when no API key is set."""
+def genai_caller(model: str | None = None) -> Caller | None:
+    """Default caller backed by google.genai; None when no API key is set.
+
+    The hearing is a plain text prompt -- no tools, no system instruction --
+    so even models without function-calling support (e.g. Gemma) can serve
+    as arbiter. Override via GOVERNOR_JUDGE_MODEL to put justice on a small,
+    frugal model while the governed agents run on a capable one.
+    """
     # google-genai reads either name; AI Studio tutorials use GEMINI_API_KEY.
     if not (os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")):
         return None
+    model = model or os.environ.get("GOVERNOR_JUDGE_MODEL", "gemini-2.5-flash")
     from google import genai
 
     client = genai.Client()
