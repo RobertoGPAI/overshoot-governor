@@ -70,7 +70,7 @@ build_notebook.py      regenerates the Kaggle notebook from these sources
 pip install -r requirements.txt
 python -m pytest tests -q      # 15 tests
 python sim/simulation.py       # runs the 4 experiments, saves figures/
-python demo/run_adk_demo.py    # live ADK demo (set GOOGLE_API_KEY first)
+python demo/run_adk_demo.py    # live ADK demo (set GOOGLE_API_KEY or GEMINI_API_KEY first)
 python -m governor.mcp_server  # governor as MCP server (GOVERNOR_BUDGET env)
 ```
 
