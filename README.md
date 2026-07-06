@@ -10,8 +10,7 @@ A token budget in a multi-agent system has the three ingredients Meadows
 identified for *overshoot and collapse*: growth (bursty concurrent calls), a
 limit (the budget), and a delay in the feedback about the limit (in-flight
 calls whose cost is unknown until they complete). This project builds the
-governor that fixes it and evaluates it with four seeded experiments. Full
-narrative: [`docs/kaggle_writeup.md`](docs/kaggle_writeup.md); executed,
+governor that fixes it and evaluates it with four seeded experiments. Executed,
 reproducible report:
 [`overshoot-governor-capstone.ipynb`](overshoot-governor-capstone.ipynb).
 
