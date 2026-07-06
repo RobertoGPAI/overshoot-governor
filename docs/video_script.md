@@ -88,7 +88,7 @@ verdict — to appeal it would need the very call it was just denied. So the
 appeal is filed *ex officio*, the way a public prosecutor speaks for a party
 that cannot speak: the driver — or a parent agent — appeals on the mission's
 behalf, not the agent's. Watch: the budget bites mid-mission, the appeal is
-filed, the judge grants it, and the writer lands the mission from the
+filed, the judge grants it, and the team lands the mission from the
 protected tranche. Same hard cap, zero overshoot, seven times less stranded
 work — while spending less. Enforcement, information, and voice: the agent
 is governed the way citizens are, not the way resources are."
