@@ -22,7 +22,12 @@ enforcement point — registered once, it covers every agent and every spawned
 subagent) and the **MCP server** (so non-ADK runtimes — Claude Code sessions,
 CI scripts — share the same budget). Enforcement semantics live in one place
 and cannot drift between surfaces; adding a third surface (e.g. a LiteLLM
-proxy hook) would be another ~100-line adapter.
+proxy hook) would be another ~100-line adapter. A third surface now exists:
+[**pi-budget-governor**](https://github.com/RobertoGPAI/pi-budget-governor)
+ports the governor to the [pi coding agent](https://pi.dev) as an installable
+extension — same policy core in TypeScript, enforcement anchored at pi's tool
+gate, plus a security analysis of the *agent fork bomb* amplification vector
+for spawning-capable deployments.
 
 ## Findings (seeded simulations, details in the notebook)
 
