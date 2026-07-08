@@ -107,6 +107,15 @@ def openai_compatible_caller(
     base_url = base_url or os.environ.get("GOVERNOR_JUDGE_BASE_URL")
     if not base_url:
         return None
+    from urllib.parse import urlparse
+
+    scheme = urlparse(base_url).scheme
+    if scheme not in ("http", "https"):
+        # urllib would happily fetch file:// and friends; the judge endpoint
+        # is operator configuration, but configuration can be wrong too.
+        raise ValueError(
+            f"GOVERNOR_JUDGE_BASE_URL must be http(s), got {scheme!r}."
+        )
     model = model or os.environ.get("GOVERNOR_JUDGE_MODEL")
     if not model:
         raise ValueError(
@@ -132,6 +141,9 @@ def openai_compatible_caller(
             "temperature": 0,
         }).encode("utf-8")
         request = urllib.request.Request(url, data=body, headers=headers)
+        # Scheme locked to http(s) at construction; the URL is operator
+        # configuration (env var), never model- or user-controlled input.
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         with urllib.request.urlopen(request, timeout=120) as response:
             payload = json.load(response)
         choices = payload.get("choices") or [{}]
