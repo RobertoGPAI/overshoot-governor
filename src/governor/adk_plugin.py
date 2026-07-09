@@ -24,6 +24,16 @@ Two intervention levels, deliberately at different Meadows leverage points:
   and retry once; the AppealsDesk may admit it into the protected appeal
   tranche. Rationed, logged, and never at the expense of the completion
   reserve.
+
+- Landing (#8 bends the trajectory, it does not sever it): inside a single
+  ADK invocation a short-circuited denial IS the agent's final message -- the
+  agent never runs again to "wrap up" or appeal, so a bare denial decapitates
+  the mission and strands the whole budget's work. On the first failed
+  reservation the governor therefore releases the completion reserve
+  (``begin_finalization`` -- this is what that tranche is *for*), admits the
+  call with ``max_output_tokens`` capped to what still fits, and instructs
+  the model to deliver its final result within that allowance. Only when even
+  the landing does not fit does the terminal denial fire.
 """
 
 from __future__ import annotations
@@ -51,6 +61,19 @@ DENIAL_TEXT = (
     "Right of appeal: if THIS call is on the critical path to the overall "
     f"mission, reply with a single line '{APPEAL_MARKER} <one-line reason tied "
     "to the mission>' and retry once. Appeals are logged and rationed."
+)
+
+# Below this many output tokens a landing is not worth admitting: the model
+# could not say anything useful and the reserve is better left unspent.
+LANDING_FLOOR = 256
+
+LANDING_TEXT = (
+    "[BUDGET GOVERNOR] FINAL ALLOWANCE. Your next step would have exceeded "
+    "the remaining budget, so the completion reserve has been released to "
+    "land the mission: this call is admitted with room for about {allowance} "
+    "output tokens, and it is the last one. Deliver the mission's final "
+    "result NOW, complete and self-contained, within that space, using only "
+    "what you already know. Do not call tools. Do not spawn agents."
 )
 
 
@@ -112,6 +135,7 @@ class BudgetGovernorPlugin(BasePlugin):
         self.estimator = estimator or OutputEstimator()
         self.visibility = visibility
         self.mission = mission
+        self.landings = 0
         self._pending: dict[str, list[tuple[Reservation, str]]] = defaultdict(list)
 
     @staticmethod
@@ -132,6 +156,29 @@ class BudgetGovernorPlugin(BasePlugin):
                         return line[len(APPEAL_MARKER):].strip()
         return None
 
+    async def _try_landing(
+        self, key: str, llm_request: LlmRequest
+    ) -> tuple[Reservation | None, int]:
+        """Admit one final, output-capped call against the completion reserve.
+
+        Returns ``(reservation, allowance)``; a ``None`` reservation means not
+        even the landing fits and the terminal denial should fire. Called at
+        most once per ledger: ``begin_finalization`` is idempotent and the
+        caller gates on ``ledger.finalizing``.
+        """
+        self.ledger.begin_finalization()
+        # The landing instruction is itself appended to the request and
+        # billed with it -- charge for it, or the allowance overshoots by
+        # exactly the text that grants it.
+        input_estimate = (
+            estimate_input_tokens(llm_request) + len(LANDING_TEXT) // 4 + 8
+        )
+        allowance = self.ledger.available - input_estimate
+        if allowance < LANDING_FLOOR:
+            return None, 0
+        reservation = await self.ledger.try_reserve(input_estimate + allowance)
+        return reservation, allowance if reservation else 0
+
     async def before_model_callback(
         self, *, callback_context: CallbackContext, llm_request: LlmRequest
     ) -> Optional[LlmResponse]:
@@ -145,6 +192,13 @@ class BudgetGovernorPlugin(BasePlugin):
             justification = self._extract_appeal(llm_request)
             if justification:
                 reservation = await self.appeals.appeal(key, estimate, justification)
+        allowance = 0
+        if reservation is None and not self.ledger.finalizing:
+            # Landing protocol: within one invocation a denial is terminal
+            # (the short-circuit text becomes the agent's final message), so
+            # before denying, release the completion reserve and admit one
+            # last call capped to whatever output still fits.
+            reservation, allowance = await self._try_landing(key, llm_request)
         if reservation is None:
             # Short-circuit: the model is never called. The refusal text tells
             # the agent to land with what it has, or appeal once with cause.
@@ -156,7 +210,18 @@ class BudgetGovernorPlugin(BasePlugin):
 
         self._pending[callback_context.invocation_id].append((reservation, key))
 
-        if self.visibility:
+        if allowance:
+            self.landings += 1
+            if llm_request.config is None:
+                llm_request.config = types.GenerateContentConfig()
+            cap = llm_request.config.max_output_tokens
+            llm_request.config.max_output_tokens = (
+                min(cap, allowance) if cap else allowance
+            )
+            llm_request.append_instructions(
+                [LANDING_TEXT.format(allowance=allowance)]
+            )
+        elif self.visibility:
             mission_line = (
                 f"Overall mission (the goal your restraint must serve): {self.mission}. "
                 if self.mission
@@ -212,6 +277,7 @@ class BudgetGovernorPlugin(BasePlugin):
             f"budget={led.budget} spent={led.spent} committed={led.committed} "
             f"available={led.available} overshoot={led.overshoot} "
             f"admitted={led.stats.admitted} denied={led.stats.denied} "
+            f"landings={self.landings} "
             f"appeals_granted={self.appeals.log.granted} "
             f"appeals_refused={self.appeals.log.refused}"
         )

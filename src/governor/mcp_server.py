@@ -44,7 +44,13 @@ _reservations: dict[str, tuple[Reservation, str]] = {}
 
 @mcp.tool()
 async def budget_status() -> dict:
-    """Read the live budget meter: available, committed, spent, overshoot."""
+    """Check how many tokens you have left before doing anything expensive.
+
+    Reads the live budget meter -- available, committed, spent, overshoot --
+    from the shared ledger. Costs nothing to call. Consult it before starting
+    a tool-heavy or long-output step, and again before deciding whether the
+    remaining budget supports another round of work or it is time to wrap up.
+    """
     return {
         "budget": _ledger.budget,
         "available": _ledger.available,
