@@ -89,7 +89,9 @@ The governor is provider-agnostic at every layer:
 
 - **The plugin** never talks to a provider: it reads the usage metadata ADK
   normalizes for whatever model the agents run on. Point the demo at any API
-  or local server through ADK's LiteLLM bridge (`pip install litellm`):
+  or local server through ADK's LiteLLM bridge (`pip install litellm` —
+  optional and demo-only; pin the version, see the [supply-chain
+  posture](security/threat_model.md#supply-chain-and-deployment-posture)):
 
   ```bash
   python demo/run_adk_demo.py --model openai/gpt-4o-mini      # any API
