@@ -176,11 +176,15 @@ class BudgetGovernorPlugin(BasePlugin):
         headroom = self.ledger.available
         # The landing fills the ledger to the brim, so it has none of the
         # slack that quietly absorbs estimation error on ordinary calls: the
-        # chars//4 heuristic undercounts structured text, and reasoning
-        # models bill thinking tokens the output cap does not govern. Cap
-        # the output below the reservation by a margin that eats both --
-        # zero overshoot is the one number this project promises.
-        margin = input_estimate // 4 + 256
+        # chars//4 heuristic can undercount, and reasoning models bill
+        # thinking tokens the output cap does not govern. Cap the output
+        # below the reservation by a margin that eats both -- zero overshoot
+        # is the one number this project promises. Sizing is empirical: the
+        # observed heuristic error on a live landing was +0.4% of the input
+        # estimate, so 10% + 128 is ~20x that error while still leaving a
+        # usable allowance when the context is large relative to headroom
+        # (an oversized margin IS a decapitation, via the floor check).
+        margin = input_estimate // 10 + 128
         allowance = headroom - input_estimate - margin
         if allowance < LANDING_FLOOR:
             return None, 0

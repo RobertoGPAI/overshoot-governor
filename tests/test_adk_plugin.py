@@ -64,7 +64,7 @@ def test_landing_admits_capped_final_call_instead_of_denying():
         input_estimate = (
             estimate_input_tokens(_request()) + len(LANDING_TEXT) // 4 + 8
         )
-        margin = input_estimate // 4 + 256
+        margin = input_estimate // 10 + 128
         expected = plugin.ledger.budget - input_estimate - margin
         assert request.config.max_output_tokens == expected
         assert "FINAL ALLOWANCE" in str(request.config.system_instruction)
@@ -110,6 +110,32 @@ def test_landing_denied_when_not_even_the_floor_fits():
         assert result is not None
         assert result.content.parts[0].text == DENIAL_TEXT
         assert plugin.landings == 0
+
+    asyncio.run(scenario())
+
+
+def test_landing_survives_a_large_context_regression():
+    """Replay of the 2026-07-10 live run that regressed to decapitation.
+
+    Budget 12000, ~4300 already spent, and a ~24k-char context at the denied
+    call: an input-proportional margin sized at 25% pushed the allowance
+    below LANDING_FLOOR and the terminal denial fired -- the margin itself
+    decapitated the mission. The landing must survive contexts that are
+    large relative to the remaining headroom.
+    """
+
+    async def scenario():
+        plugin = _plugin(budget=12_000)
+        r = await plugin.ledger.try_reserve(4294)
+        await plugin.ledger.settle(r, 4294)
+        request = _request(text="x" * 24_000)
+        result = await plugin.before_model_callback(
+            callback_context=_Ctx(), llm_request=request
+        )
+        assert result is None  # admitted: landed, not denied
+        assert plugin.landings == 1
+        assert request.config.max_output_tokens >= LANDING_FLOOR
+        assert plugin.ledger.overshoot == 0
 
     asyncio.run(scenario())
 
