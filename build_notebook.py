@@ -265,13 +265,20 @@ LLM call of *every agent and subagent* — exactly the semantics a governor need
 cannot). The implementation below is the actual repo module:
 
 - `before_model_callback` — counts the deterministic input side, adds the p90
-  output estimate, and **atomically reserves** against the shared ledger. If
-  denied, it returns a refusal `LlmResponse`, which short-circuits ADK's flow:
-  *the model is never called* — but the refusal states the right of appeal,
-  and a retry carrying `APPEAL: <reason>` is routed through the AppealsDesk.
-  If admitted and `visibility=True`, it appends the live budget state **and
-  the overall mission** to the request's system instruction (the meter), so
-  restraint and appeals alike can be weighed against the goal they serve.
+  output estimate, and **atomically reserves** against the shared ledger.
+  Before every ordinary admission it runs a **runway check**: landing the
+  mission costs one more read of a context that grows every turn, so the
+  governor keeps enough headroom to land *afterwards* — and at the point of
+  no return it lands NOW: releases the completion reserve, strips the tool
+  declarations (the only possible output is text — the deliverable), caps
+  `max_output_tokens` to what fits, and admits one final call. A refusal
+  `LlmResponse` (which short-circuits ADK's flow and, inside one invocation,
+  becomes the agent's *final message*) fires only when not even the landing
+  fits — but it states the right of appeal, and a retry carrying
+  `APPEAL: <reason>` is routed through the AppealsDesk. If admitted normally
+  and `visibility=True`, it appends the live budget state **and the overall
+  mission** to the request's system instruction (the meter), so restraint
+  and appeals alike can be weighed against the goal they serve.
 - `after_model_callback` — reconciles the reservation with the actual
   `usage_metadata` and feeds the estimator.
 - `on_model_error_callback` — cancels the reservation so failures don't leak

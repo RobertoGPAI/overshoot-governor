@@ -48,6 +48,16 @@ proxy hook) would be another ~100-line adapter.
    quota-allocating coordinator (*nemo iudex in causa sua*) — whose hearings
    are themselves billed to the ledger: justice isn't free, so appeal spam
    exhausts the hearing budget, never the mission's.
+5. **The landing** (found live, by a behavioral experiment run over this
+   plugin) — inside a single ADK invocation, a short-circuited denial IS the
+   agent's final message: a bare wall *decapitates* the mission (26/26
+   governed runs delivered the governor's own 400-char denial text as their
+   "report", stranding 65% of the budget; appeals were unreachable). The
+   governor now keeps a **dynamic runway** — landing costs one more read of
+   a context that grows every turn — and at the point of no return admits
+   one last tool-stripped call capped to what still fits. Validated live:
+   92.5% of budget used, a real deliverable, zero overshoot, and the wall
+   never even has to say no.
 
 ## Layout
 
@@ -58,7 +68,7 @@ src/governor/adk_plugin.py   BudgetGovernorPlugin (ADK 2.x Runner plugin)
 src/governor/mcp_server.py   the same ledger as an MCP server (cross-runtime)
 sim/simulation.py      the four experiments (python sim/simulation.py)
 demo/run_adk_demo.py   live Gemini A/B demo: meter on vs off (needs GOOGLE_API_KEY)
-tests/                 15 unit tests (races, atomicity, leases, appeals, judge, MCP)
+tests/                 21 unit tests (races, atomicity, leases, appeals, judge, MCP, landing)
 security/threat_model.md     STRIDE analysis (SKILLSTRIDE methodology)
 docs/                  Kaggle writeup draft + video script
 build_notebook.py      regenerates the Kaggle notebook from these sources
