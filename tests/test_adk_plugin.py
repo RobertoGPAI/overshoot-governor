@@ -58,12 +58,14 @@ def test_landing_admits_capped_final_call_instead_of_denying():
         assert result is None
         assert plugin.landings == 1
         assert plugin.ledger.finalizing
-        # Output capped to exactly what fits within the full budget, with
-        # the appended landing instruction itself billed (measure the input
-        # on a pristine copy: `request` has the instruction added by now).
-        expected = plugin.ledger.budget - (
+        # Output capped below the reservation by a safety margin, with the
+        # appended landing instruction itself billed (measure the input on
+        # a pristine copy: `request` has the instruction added by now).
+        input_estimate = (
             estimate_input_tokens(_request()) + len(LANDING_TEXT) // 4 + 8
         )
+        margin = input_estimate // 4 + 256
+        expected = plugin.ledger.budget - input_estimate - margin
         assert request.config.max_output_tokens == expected
         assert "FINAL ALLOWANCE" in str(request.config.system_instruction)
         # The reservation fills the ledger: nothing left to overshoot with.

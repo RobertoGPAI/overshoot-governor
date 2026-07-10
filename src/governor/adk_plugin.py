@@ -173,10 +173,18 @@ class BudgetGovernorPlugin(BasePlugin):
         input_estimate = (
             estimate_input_tokens(llm_request) + len(LANDING_TEXT) // 4 + 8
         )
-        allowance = self.ledger.available - input_estimate
+        headroom = self.ledger.available
+        # The landing fills the ledger to the brim, so it has none of the
+        # slack that quietly absorbs estimation error on ordinary calls: the
+        # chars//4 heuristic undercounts structured text, and reasoning
+        # models bill thinking tokens the output cap does not govern. Cap
+        # the output below the reservation by a margin that eats both --
+        # zero overshoot is the one number this project promises.
+        margin = input_estimate // 4 + 256
+        allowance = headroom - input_estimate - margin
         if allowance < LANDING_FLOOR:
             return None, 0
-        reservation = await self.ledger.try_reserve(input_estimate + allowance)
+        reservation = await self.ledger.try_reserve(headroom)
         return reservation, allowance if reservation else 0
 
     async def before_model_callback(
