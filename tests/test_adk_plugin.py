@@ -140,6 +140,41 @@ def test_landing_survives_a_large_context_regression():
     asyncio.run(scenario())
 
 
+def test_no_mission_dies_without_a_landing():
+    """The runway invariant, replaying the second live regression.
+
+    There, denial arrived with 3.1k of headroom against a 6.5k-token context:
+    the landing's own input no longer fit and the terminal denial fired. The
+    governor must land *before* the window closes: simulate a mission whose
+    context grows every turn (as contexts do) and assert the trajectory ends
+    in a landing -- never in a denial with no landing behind it.
+    """
+
+    async def scenario():
+        plugin = _plugin(budget=12_000, prior=1024)
+        chars = 2_000
+        for turn in range(20):
+            request = _request(text="x" * chars)
+            result = await plugin.before_model_callback(
+                callback_context=_Ctx(), llm_request=request
+            )
+            assert result is None, (
+                f"terminal denial at turn {turn} with landings="
+                f"{plugin.landings} -- the mission was decapitated"
+            )
+            if plugin.landings:
+                assert request.config.max_output_tokens >= LANDING_FLOOR
+                return
+            # Settle at the full reservation (worst case) and grow the
+            # context by roughly what a tool-using turn appends.
+            reservation, _ = plugin._pending["inv-1"].pop()
+            await plugin.ledger.settle(reservation, reservation.amount)
+            chars += 6_000
+        raise AssertionError("mission never landed and never ended")
+
+    asyncio.run(scenario())
+
+
 def test_ordinary_admission_still_gets_the_meter_not_the_landing():
     async def scenario():
         plugin = BudgetGovernorPlugin(

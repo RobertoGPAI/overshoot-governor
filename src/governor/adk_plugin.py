@@ -28,12 +28,17 @@ Two intervention levels, deliberately at different Meadows leverage points:
 - Landing (#8 bends the trajectory, it does not sever it): inside a single
   ADK invocation a short-circuited denial IS the agent's final message -- the
   agent never runs again to "wrap up" or appeal, so a bare denial decapitates
-  the mission and strands the whole budget's work. On the first failed
-  reservation the governor therefore releases the completion reserve
-  (``begin_finalization`` -- this is what that tranche is *for*), admits the
-  call with ``max_output_tokens`` capped to what still fits, and instructs
-  the model to deliver its final result within that allowance. Only when even
-  the landing does not fit does the terminal denial fire.
+  the mission and strands the whole budget's work. And landing has a closing
+  window: it costs one more read of the context, which grows every turn, so
+  waiting for a denial can strand the mission past the point where not even
+  the landing's input fits. The governor therefore keeps a *dynamic* runway
+  -- before admitting an ordinary call it checks that enough would remain to
+  land afterwards, and when the check fails it lands NOW: releases the
+  completion reserve (``begin_finalization`` -- this is what that tranche is
+  *for*), admits the call with ``max_output_tokens`` capped to what still
+  fits, and instructs the model to deliver its final result within that
+  allowance. Only when even the landing does not fit does the terminal
+  denial fire.
 """
 
 from __future__ import annotations
@@ -195,16 +200,34 @@ class BudgetGovernorPlugin(BasePlugin):
         self, *, callback_context: CallbackContext, llm_request: LlmRequest
     ) -> Optional[LlmResponse]:
         key = callback_context.agent_name
-        estimate = estimate_input_tokens(llm_request) + self.estimator.predict(key)
+        input_estimate = estimate_input_tokens(llm_request)
+        output_estimate = self.estimator.predict(key)
+        estimate = input_estimate + output_estimate
 
-        reservation = await self.ledger.try_reserve(estimate)
+        reservation = None
+        allowance = 0
+        if not self.ledger.finalizing:
+            # Runway check: landing costs one more read of the context, and
+            # the context grows every turn -- waiting for a denial can strand
+            # the mission past the point where not even the landing's input
+            # fits (observed live: 3.1k left against a 6.5k context). Keep
+            # enough fuel to reach the runway: if admitting this call would
+            # leave less than the NEXT landing costs (today's context plus
+            # this call's output, margin, floor), land now instead.
+            headroom = self.ledger.budget - self.ledger.spent - self.ledger.committed
+            next_input = input_estimate + output_estimate
+            runway = next_input + next_input // 10 + 128 + LANDING_FLOOR
+            if headroom - estimate < runway:
+                reservation, allowance = await self._try_landing(key, llm_request)
+
+        if reservation is None:
+            reservation = await self.ledger.try_reserve(estimate)
         if reservation is None:
             # Right of appeal (voice): a justified retry may enter the appeal
             # tranche -- never the completion reserve. Rationed and logged.
             justification = self._extract_appeal(llm_request)
             if justification:
                 reservation = await self.appeals.appeal(key, estimate, justification)
-        allowance = 0
         if reservation is None and not self.ledger.finalizing:
             # Landing protocol: within one invocation a denial is terminal
             # (the short-circuit text becomes the agent's final message), so
