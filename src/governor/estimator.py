@@ -57,8 +57,17 @@ class InputCalibrator:
     actual/estimated per key, and the estimate stops assuming.
     """
 
-    def __init__(self, window: int = 50, min_samples: int = 2) -> None:
+    def __init__(
+        self, window: int = 50, min_samples: int = 2, min_input: int = 512
+    ) -> None:
         self.min_samples = min_samples
+        # Small requests are dominated by fixed overhead the heuristic never
+        # sees (chat template, tool declarations, instructions appended after
+        # estimation): their ratios measure the takeoff, not the cruise.
+        # Observed live: a 186-token estimate against a 585-token prompt
+        # taught the calibrator 3.14x and the very next admission was denied
+        # at triple its true cost. Only slope-dominated samples train.
+        self.min_input = min_input
         self._ratios: dict[str, deque[float]] = defaultdict(
             lambda: deque(maxlen=window)
         )
@@ -68,8 +77,13 @@ class InputCalibrator:
         if not samples or len(samples) < self.min_samples:
             return 1.0  # trust the heuristic until evidence arrives
         ordered = sorted(samples)
-        return ordered[len(ordered) // 2]
+        mid = len(ordered) // 2
+        if len(ordered) % 2:
+            return ordered[mid]
+        # An even count averages the middle pair -- taking ordered[mid]
+        # crowns the larger of two, and with two samples that IS the max.
+        return (ordered[mid - 1] + ordered[mid]) / 2
 
     def update(self, key: str, estimated: int, actual: int) -> None:
-        if estimated > 0 and actual > 0:
+        if estimated >= self.min_input and actual > 0:
             self._ratios[key].append(actual / estimated)

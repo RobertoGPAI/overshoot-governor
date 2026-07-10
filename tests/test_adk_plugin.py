@@ -225,6 +225,9 @@ def test_input_calibrator_learns_the_tokenizer():
 
     cal = InputCalibrator(min_samples=2)
     assert cal.factor("a") == 1.0  # trust the heuristic until evidence
+    # Takeoff samples (tiny estimate, overhead-dominated) must not train:
+    # a 186-vs-585 first turn taught 3.14x and tripled every later estimate.
+    cal.update("a", estimated=186, actual=585)
     cal.update("a", estimated=7000, actual=4500)  # Llama-family: overcounted
     cal.update("a", estimated=7100, actual=4507)
     assert 0.6 < cal.factor("a") < 0.7
