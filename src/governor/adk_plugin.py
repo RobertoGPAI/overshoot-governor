@@ -141,6 +141,15 @@ class BudgetGovernorPlugin(BasePlugin):
         self.visibility = visibility
         self.mission = mission
         self.landings = 0
+        # The landed call is the mission's longest generation, hence the one
+        # a provider hiccup is most likely to interrupt. If it dies, its
+        # reservation is cancelled and the landing must be attemptable again
+        # on the resumed invocation -- otherwise finalizing=True walls off
+        # both ordinary admission AND the landing gate, and the retry meets
+        # a terminal denial (observed live as post-landing decapitations
+        # correlated with transient provider errors).
+        self._landing_reservation: Reservation | None = None
+        self._relandable = False
         self._pending: dict[str, list[tuple[Reservation, str]]] = defaultdict(list)
 
     @staticmethod
@@ -206,7 +215,7 @@ class BudgetGovernorPlugin(BasePlugin):
 
         reservation = None
         allowance = 0
-        if not self.ledger.finalizing:
+        if not self.ledger.finalizing or self._relandable:
             # Runway check: landing costs one more read of the context, and
             # the context grows every turn -- waiting for a denial can strand
             # the mission past the point where not even the landing's input
@@ -228,7 +237,7 @@ class BudgetGovernorPlugin(BasePlugin):
             justification = self._extract_appeal(llm_request)
             if justification:
                 reservation = await self.appeals.appeal(key, estimate, justification)
-        if reservation is None and not self.ledger.finalizing:
+        if reservation is None and (not self.ledger.finalizing or self._relandable):
             # Landing protocol: within one invocation a denial is terminal
             # (the short-circuit text becomes the agent's final message), so
             # before denying, release the completion reserve and admit one
@@ -247,6 +256,8 @@ class BudgetGovernorPlugin(BasePlugin):
 
         if allowance:
             self.landings += 1
+            self._landing_reservation = reservation
+            self._relandable = False
             if llm_request.config is None:
                 llm_request.config = types.GenerateContentConfig()
             # Obedience is not a plan: a landed model may spend its final
@@ -312,6 +323,10 @@ class BudgetGovernorPlugin(BasePlugin):
         stack = self._pending.get(callback_context.invocation_id)
         if stack:
             reservation, _ = stack.pop()
+            if reservation is self._landing_reservation:
+                # The landed call died before consuming its allowance: the
+                # resumed invocation gets to attempt the approach again.
+                self._relandable = True
             await self.ledger.cancel(reservation)
         return None
 

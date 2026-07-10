@@ -190,6 +190,41 @@ def test_no_mission_dies_without_a_landing():
     asyncio.run(scenario())
 
 
+def test_landing_is_retryable_after_a_provider_error():
+    """A gust on short final: the landed call is the mission's longest
+    generation, hence the likeliest to be interrupted by a transient
+    provider error. Observed live: the resumed invocation met
+    finalizing=True, which walled off both ordinary admission and the
+    landing gate -- terminal denial after a successful landing. A cancelled
+    landing must reopen the approach."""
+
+    async def scenario():
+        plugin = _plugin()
+        result = await plugin.before_model_callback(
+            callback_context=_Ctx(), llm_request=_request()
+        )
+        assert result is None and plugin.landings == 1
+
+        # The provider drops the landed call; ADK cancels via the plugin.
+        await plugin.on_model_error_callback(
+            callback_context=_Ctx(),
+            llm_request=_request(),
+            error=RuntimeError("503 UNAVAILABLE"),
+        )
+
+        # The retry invocation must land again, not meet a terminal denial.
+        request = _request()
+        result = await plugin.before_model_callback(
+            callback_context=_Ctx(), llm_request=request
+        )
+        assert result is None, "retry after a dropped landing was denied"
+        assert plugin.landings == 2
+        assert request.config.max_output_tokens >= LANDING_FLOOR
+        assert plugin.ledger.overshoot == 0
+
+    asyncio.run(scenario())
+
+
 def test_ordinary_admission_still_gets_the_meter_not_the_landing():
     async def scenario():
         plugin = BudgetGovernorPlugin(
