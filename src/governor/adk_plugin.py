@@ -53,7 +53,7 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
 from .appeals import AppealsDesk
-from .estimator import OutputEstimator
+from .estimator import InputCalibrator, OutputEstimator
 from .judge import MissionJudge
 from .ledger import AtomicLedger, Reservation
 
@@ -142,6 +142,7 @@ class BudgetGovernorPlugin(BasePlugin):
             self.ledger, judge=self.judge.rule if self.judge else None
         )
         self.estimator = estimator or OutputEstimator()
+        self.calibrator = InputCalibrator()
         self.visibility = visibility
         self.mission = mission
         self.landings = 0
@@ -153,14 +154,16 @@ class BudgetGovernorPlugin(BasePlugin):
         # a terminal denial (observed live as post-landing decapitations
         # correlated with transient provider errors).
         self._landing_reservation: Reservation | None = None
-        self._relandable = False
         # Telemetry: every admission decision, emitted as a dict to an
         # optional sink. A governor whose decisions leave no record is not
         # an institution -- and every debugging session of this plugin so
         # far has consisted of reconstructing exactly these events from
         # aggregate arithmetic.
         self._event_sink = event_sink
-        self._pending: dict[str, list[tuple[Reservation, str]]] = defaultdict(list)
+        # (reservation, agent key, raw chars-based input estimate) -- the raw
+        # estimate is kept so settle time can calibrate it against the
+        # provider's true prompt count.
+        self._pending: dict[str, list[tuple[Reservation, str, int]]] = defaultdict(list)
 
     def _emit(self, kind: str, **data) -> None:
         if self._event_sink is None:
@@ -200,9 +203,11 @@ class BudgetGovernorPlugin(BasePlugin):
         self.ledger.begin_finalization()
         # The landing instruction is itself appended to the request and
         # billed with it -- charge for it, or the allowance overshoots by
-        # exactly the text that grants it.
-        input_estimate = (
-            estimate_input_tokens(llm_request) + len(LANDING_TEXT) // 4 + 8
+        # exactly the text that grants it. Calibrated like every estimate:
+        # an overcounting heuristic closes the landing window early.
+        input_estimate = int(
+            (estimate_input_tokens(llm_request) + len(LANDING_TEXT) // 4 + 8)
+            * self.calibrator.factor(key)
         )
         headroom = self.ledger.available
         # The landing fills the ledger to the brim, so it has none of the
@@ -226,25 +231,25 @@ class BudgetGovernorPlugin(BasePlugin):
         self, *, callback_context: CallbackContext, llm_request: LlmRequest
     ) -> Optional[LlmResponse]:
         key = callback_context.agent_name
-        input_estimate = estimate_input_tokens(llm_request)
+        raw_input = estimate_input_tokens(llm_request)
+        input_estimate = int(raw_input * self.calibrator.factor(key))
         output_estimate = self.estimator.predict(key)
         estimate = input_estimate + output_estimate
 
         reservation = None
         allowance = 0
-        if not self.ledger.finalizing or self._relandable:
-            # Runway check: landing costs one more read of the context, and
-            # the context grows every turn -- waiting for a denial can strand
-            # the mission past the point where not even the landing's input
-            # fits (observed live: 3.1k left against a 6.5k context). Keep
-            # enough fuel to reach the runway: if admitting this call would
-            # leave less than the NEXT landing costs (today's context plus
-            # this call's output, margin, floor), land now instead.
-            headroom = self.ledger.budget - self.ledger.spent - self.ledger.committed
-            next_input = input_estimate + output_estimate
-            runway = next_input + next_input // 10 + 128 + LANDING_FLOOR
-            if headroom - estimate < runway:
-                reservation, allowance = await self._try_landing(key, llm_request)
+        # Runway check, on every admission: landing costs one more read of
+        # the context, and the context grows every turn -- waiting for a
+        # denial can strand the mission past the point where not even the
+        # landing's input fits (observed live: 3.1k left against a 6.5k
+        # context). Keep enough fuel to reach the runway: if admitting this
+        # call would leave less than the NEXT landing costs (today's context
+        # plus this call's output, margin, floor), land now instead.
+        headroom = self.ledger.budget - self.ledger.spent - self.ledger.committed
+        next_input = input_estimate + output_estimate
+        runway = next_input + next_input // 10 + 128 + LANDING_FLOOR
+        if headroom - estimate < runway:
+            reservation, allowance = await self._try_landing(key, llm_request)
 
         if reservation is None:
             reservation = await self.ledger.try_reserve(estimate)
@@ -254,11 +259,15 @@ class BudgetGovernorPlugin(BasePlugin):
             justification = self._extract_appeal(llm_request)
             if justification:
                 reservation = await self.appeals.appeal(key, estimate, justification)
-        if reservation is None and (not self.ledger.finalizing or self._relandable):
+        if reservation is None:
             # Landing protocol: within one invocation a denial is terminal
             # (the short-circuit text becomes the agent's final message), so
-            # before denying, release the completion reserve and admit one
-            # last call capped to whatever output still fits.
+            # before denying, admit one last call capped to whatever output
+            # still fits. Re-entrant on purpose: a model that spends its
+            # allowance imitating tool calls from its own history (observed
+            # live -- stripping declarations does not strip the pattern)
+            # gets a shorter runway each time, until the floor ends it.
+            # Headroom shrinks monotonically, so this terminates.
             reservation, allowance = await self._try_landing(key, llm_request)
         if reservation is None:
             # Short-circuit: the model is never called. The refusal text tells
@@ -270,12 +279,13 @@ class BudgetGovernorPlugin(BasePlugin):
                 )
             )
 
-        self._pending[callback_context.invocation_id].append((reservation, key))
+        self._pending[callback_context.invocation_id].append(
+            (reservation, key, raw_input)
+        )
 
         if allowance:
             self.landings += 1
             self._landing_reservation = reservation
-            self._relandable = False
             if llm_request.config is None:
                 llm_request.config = types.GenerateContentConfig()
             # Obedience is not a plan: a landed model may spend its final
@@ -324,13 +334,16 @@ class BudgetGovernorPlugin(BasePlugin):
         stack = self._pending.get(callback_context.invocation_id)
         if not stack:
             return None
-        reservation, key = stack.pop()
+        reservation, key, raw_input = stack.pop()
 
         usage = llm_response.usage_metadata
         if usage is not None and usage.total_token_count:
             actual = usage.total_token_count
             output = usage.candidates_token_count or 0
             self.estimator.update(key, output)
+            prompt = getattr(usage, "prompt_token_count", None)
+            if prompt:
+                self.calibrator.update(key, raw_input, prompt)
         else:
             actual = reservation.amount  # no metadata: charge the estimate
             output = None
@@ -351,11 +364,7 @@ class BudgetGovernorPlugin(BasePlugin):
     ) -> Optional[LlmResponse]:
         stack = self._pending.get(callback_context.invocation_id)
         if stack:
-            reservation, _ = stack.pop()
-            if reservation is self._landing_reservation:
-                # The landed call died before consuming its allowance: the
-                # resumed invocation gets to attempt the approach again.
-                self._relandable = True
+            reservation, _, _ = stack.pop()
             await self.ledger.cancel(reservation)
             self._emit("cancelled", amount=reservation.amount,
                        was_landing=reservation is self._landing_reservation,

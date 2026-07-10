@@ -97,7 +97,7 @@ def test_denial_is_terminal_after_the_landing():
             callback_context=_Ctx(), llm_request=_request()
         )
         # The landing call settles at its full reservation; budget exhausted.
-        reservation, _ = plugin._pending["inv-1"].pop()
+        reservation, _, _ = plugin._pending["inv-1"].pop()
         await plugin.ledger.settle(reservation, reservation.amount)
 
         result = await plugin.before_model_callback(
@@ -183,12 +183,55 @@ def test_no_mission_dies_without_a_landing():
                 return
             # Settle at the full reservation (worst case) and grow the
             # context by roughly what a tool-using turn appends.
-            reservation, _ = plugin._pending["inv-1"].pop()
+            reservation, _, _ = plugin._pending["inv-1"].pop()
             await plugin.ledger.settle(reservation, reservation.amount)
             chars += 6_000
         raise AssertionError("mission never landed and never ended")
 
     asyncio.run(scenario())
+
+
+def test_wasted_landing_gets_a_shorter_second_runway():
+    """Re-entrant landing: a model that spends its final allowance imitating
+    tool calls (observed live on Nemotron -- stripping declarations does not
+    strip the pattern in its own history) gets another, shorter landing
+    instead of a terminal denial, until the floor ends it."""
+
+    async def scenario():
+        plugin = _plugin()  # budget 2000, prior 5000: first call must land
+        request = _request()
+        assert await plugin.before_model_callback(
+            callback_context=_Ctx(), llm_request=request
+        ) is None
+        first_cap = request.config.max_output_tokens
+        # The landed call wastes its allowance on a cheap tool call.
+        reservation, _, _ = plugin._pending["inv-1"].pop()
+        await plugin.ledger.settle(reservation, 300)
+
+        request2 = _request()
+        result = await plugin.before_model_callback(
+            callback_context=_Ctx(), llm_request=request2
+        )
+        assert result is None, "second landing denied"
+        assert plugin.landings == 2
+        assert request2.config.max_output_tokens < first_cap
+        assert plugin.ledger.overshoot == 0
+
+    asyncio.run(scenario())
+
+
+def test_input_calibrator_learns_the_tokenizer():
+    from governor.estimator import InputCalibrator
+
+    cal = InputCalibrator(min_samples=2)
+    assert cal.factor("a") == 1.0  # trust the heuristic until evidence
+    cal.update("a", estimated=7000, actual=4500)  # Llama-family: overcounted
+    cal.update("a", estimated=7100, actual=4507)
+    assert 0.6 < cal.factor("a") < 0.7
+    cal.update("b", estimated=3000, actual=3600)  # Spanish: undercounted
+    cal.update("b", estimated=3000, actual=3500)
+    assert cal.factor("b") > 1.1
+    assert cal.factor("c") == 1.0  # keys are independent
 
 
 def test_event_sink_records_the_decision_trail():

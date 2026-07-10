@@ -42,3 +42,34 @@ class OutputEstimator:
     def update(self, key: str, actual: int) -> None:
         """Feed the actual output token count observed at settle time."""
         self._history[key].append(actual)
+
+
+class InputCalibrator:
+    """Rolling correction factor for the chars-per-token input heuristic.
+
+    A constant like chars//4 embeds a language and a tokenizer (English,
+    ~4 chars/token); real tokenizers differ in both directions -- Spanish
+    prose runs ~3.5, Llama-family tokenizers on structured text ~6. Both
+    errors are harmful: undercounting risks overshoot, overcounting closes
+    the landing window early (observed live: a mission force-landed on
+    turn 2 with 93% of its budget unspent). At settle time the provider
+    reports the true prompt token count; the calibrator learns
+    actual/estimated per key, and the estimate stops assuming.
+    """
+
+    def __init__(self, window: int = 50, min_samples: int = 2) -> None:
+        self.min_samples = min_samples
+        self._ratios: dict[str, deque[float]] = defaultdict(
+            lambda: deque(maxlen=window)
+        )
+
+    def factor(self, key: str) -> float:
+        samples = self._ratios.get(key)
+        if not samples or len(samples) < self.min_samples:
+            return 1.0  # trust the heuristic until evidence arrives
+        ordered = sorted(samples)
+        return ordered[len(ordered) // 2]
+
+    def update(self, key: str, estimated: int, actual: int) -> None:
+        if estimated > 0 and actual > 0:
+            self._ratios[key].append(actual / estimated)
