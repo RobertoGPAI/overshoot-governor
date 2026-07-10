@@ -33,9 +33,17 @@ class _Ctx:
     invocation_id = "inv-1"
 
 
-def _request(text: str = "x" * 400) -> LlmRequest:
+def _request(text: str = "x" * 400, with_tools: bool = False) -> LlmRequest:
+    config = None
+    if with_tools:
+        config = types.GenerateContentConfig(
+            tools=[types.Tool(function_declarations=[
+                types.FunctionDeclaration(name="investigate")
+            ])]
+        )
     return LlmRequest(
-        contents=[types.Content(role="user", parts=[types.Part(text=text)])]
+        contents=[types.Content(role="user", parts=[types.Part(text=text)])],
+        config=config,
     )
 
 
@@ -50,7 +58,7 @@ def _plugin(budget: int = 2000, prior: int = 5000) -> BudgetGovernorPlugin:
 def test_landing_admits_capped_final_call_instead_of_denying():
     async def scenario():
         plugin = _plugin()
-        request = _request()
+        request = _request(with_tools=True)
         result = await plugin.before_model_callback(
             callback_context=_Ctx(), llm_request=request
         )
@@ -58,6 +66,11 @@ def test_landing_admits_capped_final_call_instead_of_denying():
         assert result is None
         assert plugin.landings == 1
         assert plugin.ledger.finalizing
+        # The landed call cannot call tools: the affordance is removed, so
+        # the only possible output is text -- the mission's deliverable.
+        # (Observed live: a landed model spent its allowance on one more
+        # tool call and was decapitated by the post-tool denial.)
+        assert request.config.tools is None
         # Output capped below the reservation by a safety margin, with the
         # appended landing instruction itself billed (measure the input on
         # a pristine copy: `request` has the instruction added by now).

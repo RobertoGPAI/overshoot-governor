@@ -249,6 +249,15 @@ class BudgetGovernorPlugin(BasePlugin):
             self.landings += 1
             if llm_request.config is None:
                 llm_request.config = types.GenerateContentConfig()
+            # Obedience is not a plan: a landed model may spend its final
+            # allowance calling another tool (observed live), and the call
+            # after the tool round-trip meets an exhausted ledger -- terminal
+            # denial, decapitation AFTER the landing. Remove the affordance
+            # instead of requesting the behavior: with no tool declarations
+            # the only possible output is text, and text ends the invocation
+            # as the mission's actual deliverable.
+            llm_request.config.tools = None
+            llm_request.config.tool_config = None
             cap = llm_request.config.max_output_tokens
             llm_request.config.max_output_tokens = (
                 min(cap, allowance) if cap else allowance
