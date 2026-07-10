@@ -34,16 +34,18 @@ class _Ctx:
 
 
 def _request(text: str = "x" * 400, with_tools: bool = False) -> LlmRequest:
-    config = None
+    kwargs = {}
     if with_tools:
-        config = types.GenerateContentConfig(
+        # Only override the framework's default config when the test needs
+        # tool declarations; config=None breaks append_instructions.
+        kwargs["config"] = types.GenerateContentConfig(
             tools=[types.Tool(function_declarations=[
                 types.FunctionDeclaration(name="investigate")
             ])]
         )
     return LlmRequest(
         contents=[types.Content(role="user", parts=[types.Part(text=text)])],
-        config=config,
+        **kwargs,
     )
 
 
