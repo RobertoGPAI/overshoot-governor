@@ -301,9 +301,18 @@ class BudgetGovernorPlugin(BasePlugin):
             llm_request.config.max_output_tokens = (
                 min(cap, allowance) if cap else allowance
             )
-            llm_request.append_instructions(
-                [LANDING_TEXT.format(allowance=allowance)]
-            )
+            # The landing order rides as the LAST user message, not as a
+            # system instruction: the end of the context is where attention
+            # actually lands, and models that shrugged off the instruction
+            # obeyed the message.
+            llm_request.contents = list(llm_request.contents or []) + [
+                types.Content(
+                    role="user",
+                    parts=[types.Part(
+                        text=LANDING_TEXT.format(allowance=allowance)
+                    )],
+                )
+            ]
             self._emit("landing", agent=key, allowance=allowance,
                        cap=llm_request.config.max_output_tokens,
                        reserved=reservation.amount)
@@ -348,11 +357,36 @@ class BudgetGovernorPlugin(BasePlugin):
             actual = reservation.amount  # no metadata: charge the estimate
             output = None
         await self.ledger.settle(reservation, actual)
+        was_landing = reservation is self._landing_reservation
         self._emit(
             "settled", agent=key, actual=actual, output=output,
             thoughts=getattr(usage, "thoughts_token_count", None) if usage else None,
-            was_landing=reservation is self._landing_reservation,
+            was_landing=was_landing,
         )
+
+        # A landing is a landing: nothing takes off after it. Stripping tool
+        # *declarations* does not stop a model whose own history teaches the
+        # pattern (observed live: the landed call kept tool-calling and its
+        # follow-up died at the exhausted ledger). So the guarantee moves to
+        # the response side: drop any function calls from the landed reply,
+        # and the invocation finalizes with whatever the model actually
+        # wrote -- its words, however thin, not the governor's.
+        if was_landing and llm_response.content and llm_response.content.parts:
+            kept = [p for p in llm_response.content.parts
+                    if p.function_call is None]
+            stripped = len(llm_response.content.parts) - len(kept)
+            if stripped:
+                if not any(p.text for p in kept):
+                    kept.append(types.Part(text=(
+                        "[BUDGET GOVERNOR] The mission landed at budget "
+                        "exhaustion before a final report was written."
+                    )))
+                self._emit("landing_enforced", agent=key,
+                           calls_stripped=stripped)
+                return LlmResponse(
+                    content=types.Content(role="model", parts=kept),
+                    usage_metadata=llm_response.usage_metadata,
+                )
         return None
 
     async def on_model_error_callback(

@@ -83,7 +83,11 @@ def test_landing_admits_capped_final_call_instead_of_denying():
         margin = input_estimate // 10 + 128
         expected = plugin.ledger.budget - input_estimate - margin
         assert request.config.max_output_tokens == expected
-        assert "FINAL ALLOWANCE" in str(request.config.system_instruction)
+        # The landing order rides as the last user message (max attention),
+        # not as a system instruction.
+        last = request.contents[-1]
+        assert last.role == "user"
+        assert "FINAL ALLOWANCE" in last.parts[0].text
         # The reservation fills the ledger: nothing left to overshoot with.
         assert plugin.ledger.available == 0
 
@@ -216,6 +220,51 @@ def test_wasted_landing_gets_a_shorter_second_runway():
         assert plugin.landings == 2
         assert request2.config.max_output_tokens < first_cap
         assert plugin.ledger.overshoot == 0
+
+    asyncio.run(scenario())
+
+
+def test_landing_reply_cannot_take_off_again():
+    """A landing is a landing: function calls in the landed reply are
+    stripped at settle time, so the invocation finalizes with the model's
+    own words instead of executing one more tool round against an
+    exhausted ledger (observed live on Nemotron: declaration-stripping
+    does not stop a model whose history teaches the pattern)."""
+
+    async def scenario():
+        plugin = _plugin()
+        await plugin.before_model_callback(
+            callback_context=_Ctx(), llm_request=_request()
+        )
+        reply = LlmResponse(content=types.Content(role="model", parts=[
+            types.Part(text="Preliminary notes on the findings."),
+            types.Part(function_call=types.FunctionCall(
+                name="investigate", args={"aspect": "more"}
+            )),
+        ]))
+        replaced = await plugin.after_model_callback(
+            callback_context=_Ctx(), llm_response=reply
+        )
+        assert replaced is not None
+        texts = [p.text for p in replaced.content.parts if p.text]
+        assert texts == ["Preliminary notes on the findings."]
+        assert not any(p.function_call for p in replaced.content.parts)
+
+        # And a call-only reply gets the governor's minimal epitaph rather
+        # than an empty final message.
+        plugin2 = _plugin()
+        await plugin2.before_model_callback(
+            callback_context=_Ctx(), llm_request=_request()
+        )
+        reply2 = LlmResponse(content=types.Content(role="model", parts=[
+            types.Part(function_call=types.FunctionCall(
+                name="investigate", args={}
+            )),
+        ]))
+        replaced2 = await plugin2.after_model_callback(
+            callback_context=_Ctx(), llm_response=reply2
+        )
+        assert "landed at budget exhaustion" in replaced2.content.parts[-1].text
 
     asyncio.run(scenario())
 
