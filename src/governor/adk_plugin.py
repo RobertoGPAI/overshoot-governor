@@ -78,7 +78,10 @@ LANDING_TEXT = (
     "land the mission: this call is admitted with room for about {allowance} "
     "output tokens, and it is the last one. Deliver the mission's final "
     "result NOW, complete and self-contained, within that space, using only "
-    "what you already know. Do not call tools. Do not spawn agents."
+    "what you already know. Do not call tools. Do not spawn agents. If you "
+    "reason before writing, your reasoning bills against this same "
+    "allowance: think briefly or not at all -- write the deliverable "
+    "directly."
 )
 
 
@@ -119,6 +122,7 @@ class BudgetGovernorPlugin(BasePlugin):
         estimator: OutputEstimator | None = None,
         arbiter: bool = False,
         name: str = "budget_governor",
+        event_sink=None,
     ) -> None:
         super().__init__(name=name)
         self.ledger = AtomicLedger(
@@ -150,7 +154,20 @@ class BudgetGovernorPlugin(BasePlugin):
         # correlated with transient provider errors).
         self._landing_reservation: Reservation | None = None
         self._relandable = False
+        # Telemetry: every admission decision, emitted as a dict to an
+        # optional sink. A governor whose decisions leave no record is not
+        # an institution -- and every debugging session of this plugin so
+        # far has consisted of reconstructing exactly these events from
+        # aggregate arithmetic.
+        self._event_sink = event_sink
         self._pending: dict[str, list[tuple[Reservation, str]]] = defaultdict(list)
+
+    def _emit(self, kind: str, **data) -> None:
+        if self._event_sink is None:
+            return
+        led = self.ledger
+        self._event_sink({"event": kind, "spent": led.spent,
+                          "committed": led.committed, **data})
 
     @staticmethod
     def _extract_appeal(llm_request: LlmRequest) -> str | None:
@@ -246,6 +263,7 @@ class BudgetGovernorPlugin(BasePlugin):
         if reservation is None:
             # Short-circuit: the model is never called. The refusal text tells
             # the agent to land with what it has, or appeal once with cause.
+            self._emit("denied_terminal", agent=key, estimate=estimate)
             return LlmResponse(
                 content=types.Content(
                     role="model", parts=[types.Part(text=DENIAL_TEXT)]
@@ -276,6 +294,9 @@ class BudgetGovernorPlugin(BasePlugin):
             llm_request.append_instructions(
                 [LANDING_TEXT.format(allowance=allowance)]
             )
+            self._emit("landing", agent=key, allowance=allowance,
+                       cap=llm_request.config.max_output_tokens,
+                       reserved=reservation.amount)
         elif self.visibility:
             mission_line = (
                 f"Overall mission (the goal your restraint must serve): {self.mission}. "
@@ -293,6 +314,8 @@ class BudgetGovernorPlugin(BasePlugin):
                 "critical call is denied, you may appeal with "
                 f"'{APPEAL_MARKER} <reason>'."
             ])
+        if not allowance:
+            self._emit("admitted", agent=key, estimate=estimate)
         return None
 
     async def after_model_callback(
@@ -310,7 +333,13 @@ class BudgetGovernorPlugin(BasePlugin):
             self.estimator.update(key, output)
         else:
             actual = reservation.amount  # no metadata: charge the estimate
+            output = None
         await self.ledger.settle(reservation, actual)
+        self._emit(
+            "settled", agent=key, actual=actual, output=output,
+            thoughts=getattr(usage, "thoughts_token_count", None) if usage else None,
+            was_landing=reservation is self._landing_reservation,
+        )
         return None
 
     async def on_model_error_callback(
@@ -328,6 +357,9 @@ class BudgetGovernorPlugin(BasePlugin):
                 # resumed invocation gets to attempt the approach again.
                 self._relandable = True
             await self.ledger.cancel(reservation)
+            self._emit("cancelled", amount=reservation.amount,
+                       was_landing=reservation is self._landing_reservation,
+                       error=type(error).__name__)
         return None
 
     def report(self) -> str:

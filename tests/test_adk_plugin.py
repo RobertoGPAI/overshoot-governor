@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from google.adk.models.llm_request import LlmRequest
+from google.adk.models.llm_response import LlmResponse
 from google.genai import types
 
 from governor.adk_plugin import (
@@ -186,6 +187,32 @@ def test_no_mission_dies_without_a_landing():
             await plugin.ledger.settle(reservation, reservation.amount)
             chars += 6_000
         raise AssertionError("mission never landed and never ended")
+
+    asyncio.run(scenario())
+
+
+def test_event_sink_records_the_decision_trail():
+    """The governor's decisions leave a record: landing, settle, denial."""
+
+    async def scenario():
+        events = []
+        plugin = BudgetGovernorPlugin(
+            budget=2000,
+            estimator=OutputEstimator(prior=5000),
+            event_sink=events.append,
+        )
+        await plugin.before_model_callback(
+            callback_context=_Ctx(), llm_request=_request()
+        )
+        await plugin.after_model_callback(
+            callback_context=_Ctx(),
+            llm_response=LlmResponse(),  # no usage: charged at the estimate
+        )
+
+        kinds = [e["event"] for e in events]
+        assert kinds == ["landing", "settled"]
+        assert events[0]["allowance"] > 0 and events[0]["cap"] > 0
+        assert events[1]["was_landing"] and events[1]["actual"] > 0
 
     asyncio.run(scenario())
 
