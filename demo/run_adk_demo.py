@@ -1,10 +1,18 @@
-"""Live ADK 2.x demo: a governed multi-agent team doing real Gemini calls.
+"""Live ADK 2.x demo: a governed multi-agent team doing real model calls.
 
 Runs the same research task twice under the same budget -- once with budget
 visibility injected into every request (the meter in the hallway) and once
-blind -- and prints both ledger reports. Requires GOOGLE_API_KEY.
+blind -- and prints both ledger reports.
+
+Models: bare names are Gemini (requires GEMINI_API_KEY or GOOGLE_API_KEY);
+`provider/name` routes through ADK's LiteLLM bridge to any API or local
+server (requires `pip install litellm` plus the provider's own env key, if
+any -- local servers typically need none):
 
     python demo/run_adk_demo.py [--budget 20000]
+    python demo/run_adk_demo.py --model openai/gpt-4o-mini
+    python demo/run_adk_demo.py --model anthropic/claude-haiku-4-5
+    python demo/run_adk_demo.py --model ollama_chat/llama3.1
 """
 
 from __future__ import annotations
@@ -28,6 +36,20 @@ from governor.adk_plugin import BudgetGovernorPlugin
 # when the default's requests-per-minute/day quota runs out.
 DEFAULT_MODEL = "gemini-2.5-flash"
 MODEL = DEFAULT_MODEL
+
+
+def resolve_model(name: str):
+    """Bare names stay Gemini strings; `provider/name` becomes a LiteLLM
+    model object, opening the demo to any API and to local servers."""
+    if "/" not in name:
+        return name
+    try:
+        from google.adk.models.lite_llm import LiteLlm
+    except ImportError:
+        sys.exit(
+            f"Model {name!r} needs ADK's LiteLLM bridge: pip install litellm"
+        )
+    return LiteLlm(model=name)
 
 TASK = (
     "Research the concept of 'overshoot and collapse' in system dynamics and "
@@ -133,9 +155,10 @@ async def main() -> None:
     parser.add_argument("--budget", type=int, default=20_000)
     parser.add_argument(
         "--model",
-        default=DEFAULT_MODEL,
-        help="Gemini model for the team (try gemini-2.5-flash-lite when the "
-        "free-tier quota of the default runs out)",
+        default=os.environ.get("GOVERNOR_MODEL", DEFAULT_MODEL),
+        help="team model: a bare Gemini name (try gemini-2.5-flash-lite when "
+        "the free-tier quota runs out), or provider/name for any API or "
+        "local model via LiteLLM (openai/gpt-4o-mini, ollama_chat/llama3.1)",
     )
     parser.add_argument(
         "--appeal-demo",
@@ -146,15 +169,21 @@ async def main() -> None:
     args = parser.parse_args()
 
     global MODEL
-    MODEL = args.model
+    MODEL = resolve_model(args.model)
 
     # AI Studio and most tutorials call it GEMINI_API_KEY; the google-genai SDK
     # accepts either name. Accept both so the demo runs whichever you set.
-    if not (os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")):
+    # LiteLLM models authenticate via their own provider env vars (or none at
+    # all for local servers), so the Gemini check only guards bare names.
+    if "/" not in args.model and not (
+        os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    ):
         sys.exit(
             "No API key found. Set GEMINI_API_KEY (or GOOGLE_API_KEY). "
             "Get a free key at https://aistudio.google.com/apikey and run:  "
-            "export GEMINI_API_KEY=...  (Linux/WSL/Kaggle)."
+            "export GEMINI_API_KEY=...  (Linux/WSL/Kaggle). "
+            "Or pass --model provider/name (LiteLLM syntax) to use any other "
+            "API or a local model."
         )
 
     if args.appeal_demo:

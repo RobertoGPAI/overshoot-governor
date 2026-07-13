@@ -18,6 +18,13 @@ Offline behavior: with no model caller available (no API key), the judge
 abstains and defers to the desk's mechanical policy (justification present +
 ration). That keeps tests and simulations deterministic; the LLM ruling is an
 upgrade, not a dependency.
+
+Provider resolution (any API, local included): set GOVERNOR_JUDGE_BASE_URL to
+put justice on any OpenAI-compatible endpoint -- OpenAI itself, gateways
+(LiteLLM proxy, OpenRouter), or local servers (Ollama, LM Studio, vLLM,
+llama.cpp) -- with GOVERNOR_JUDGE_MODEL naming the model and
+GOVERNOR_JUDGE_API_KEY if the endpoint wants one. Without a base URL the
+google.genai path applies as before; without either, the judge abstains.
 """
 
 from __future__ import annotations
@@ -85,6 +92,88 @@ def genai_caller(model: str | None = None) -> Caller | None:
     return call
 
 
+def openai_compatible_caller(
+    base_url: str | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
+) -> Caller | None:
+    """Caller for any OpenAI-compatible /chat/completions endpoint; None when
+    no base URL is configured.
+
+    Covers OpenAI itself, gateways (LiteLLM proxy, OpenRouter) and local
+    servers (Ollama, LM Studio, vLLM, llama.cpp) with one code path.
+    Stdlib-only on purpose: the governor stays dependency-free.
+    """
+    base_url = base_url or os.environ.get("GOVERNOR_JUDGE_BASE_URL")
+    if not base_url:
+        return None
+    from urllib.parse import urlparse
+
+    scheme = urlparse(base_url).scheme
+    if scheme not in ("http", "https"):
+        # urllib would happily fetch file:// and friends; the judge endpoint
+        # is operator configuration, but configuration can be wrong too.
+        raise ValueError(
+            f"GOVERNOR_JUDGE_BASE_URL must be http(s), got {scheme!r}."
+        )
+    model = model or os.environ.get("GOVERNOR_JUDGE_MODEL")
+    if not model:
+        raise ValueError(
+            "GOVERNOR_JUDGE_BASE_URL is set but no judge model is named: "
+            "set GOVERNOR_JUDGE_MODEL (there is no sane default across "
+            "OpenAI-compatible servers)."
+        )
+    api_key = api_key if api_key is not None else os.environ.get("GOVERNOR_JUDGE_API_KEY", "")
+
+    import json
+    import urllib.error
+    import urllib.request
+
+    url = base_url.rstrip("/") + "/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    def _post(prompt: str) -> tuple[str, int]:
+        body = json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+        }).encode("utf-8")
+        request = urllib.request.Request(url, data=body, headers=headers)
+        # Scheme locked to http(s) at construction; the URL is operator
+        # configuration (env var), never model- or user-controlled input.
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+        with urllib.request.urlopen(request, timeout=120) as response:
+            payload = json.load(response)
+        choices = payload.get("choices") or [{}]
+        text = (choices[0].get("message") or {}).get("content") or ""
+        usage = payload.get("usage") or {}
+        return text, int(usage.get("total_tokens") or 0)
+
+    async def call(prompt: str) -> tuple[str, int]:
+        # Same policy as the genai path: a transient 5xx must not decide a
+        # case; client errors (4xx) fail immediately and the hearing fails
+        # closed.
+        for attempt in (1, 2, 3):
+            try:
+                return await asyncio.to_thread(_post, prompt)
+            except urllib.error.HTTPError as exc:
+                if exc.code < 500 or attempt == 3:
+                    raise
+                await asyncio.sleep(attempt)
+        raise RuntimeError("unreachable")
+
+    return call
+
+
+def default_caller(model: str | None = None) -> Caller | None:
+    """Provider resolution for the judge: an OpenAI-compatible endpoint when
+    GOVERNOR_JUDGE_BASE_URL is set, else google.genai when a Gemini key
+    exists, else None (the judge abstains)."""
+    return openai_compatible_caller(model=model) or genai_caller(model=model)
+
+
 class MissionJudge:
     """Arbiter for AppealsDesk: plug ``.rule`` into the desk's judge hook."""
 
@@ -97,7 +186,7 @@ class MissionJudge:
     ) -> None:
         self.mission = mission
         self.ledger = ledger
-        self.caller = caller if caller is not None else genai_caller()
+        self.caller = caller if caller is not None else default_caller()
         self.hearing_estimate = hearing_estimate
         self.hearings = 0
         self.hearing_tokens = 0

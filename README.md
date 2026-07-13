@@ -22,7 +22,12 @@ enforcement point — registered once, it covers every agent and every spawned
 subagent) and the **MCP server** (so non-ADK runtimes — Claude Code sessions,
 CI scripts — share the same budget). Enforcement semantics live in one place
 and cannot drift between surfaces; adding a third surface (e.g. a LiteLLM
-proxy hook) would be another ~100-line adapter.
+proxy hook) would be another ~100-line adapter. A third surface now exists:
+[**pi-budget-governor**](https://github.com/RobertoGPAI/pi-budget-governor)
+ports the governor to the [pi coding agent](https://pi.dev) as an installable
+extension — same policy core in TypeScript, enforcement anchored at pi's tool
+gate, plus a security analysis of the *agent fork bomb* amplification vector
+for spawning-capable deployments.
 
 ## Findings (seeded simulations, details in the notebook)
 
@@ -67,8 +72,8 @@ src/governor/judge.py  MissionJudge: budgeted arbiter agent for appeals
 src/governor/adk_plugin.py   BudgetGovernorPlugin (ADK 2.x Runner plugin)
 src/governor/mcp_server.py   the same ledger as an MCP server (cross-runtime)
 sim/simulation.py      the four experiments (python sim/simulation.py)
-demo/run_adk_demo.py   live Gemini A/B demo: meter on vs off (needs GOOGLE_API_KEY)
-tests/                 21 unit tests (races, atomicity, leases, appeals, judge, MCP, landing)
+demo/run_adk_demo.py   live A/B demo: meter on vs off (Gemini, any API, or local)
+tests/                 26 unit tests (races, atomicity, leases, appeals, judge, MCP, landing, calibration)
 security/threat_model.md     STRIDE analysis (SKILLSTRIDE methodology)
 docs/                  Kaggle writeup draft + video script
 build_notebook.py      regenerates the Kaggle notebook from these sources
@@ -78,7 +83,7 @@ build_notebook.py      regenerates the Kaggle notebook from these sources
 
 ```bash
 pip install -r requirements.txt
-python -m pytest tests -q      # 15 tests
+python -m pytest tests -q      # 26 tests
 python sim/simulation.py       # runs the 4 experiments, saves figures/
 python demo/run_adk_demo.py    # live ADK demo (set GOOGLE_API_KEY or GEMINI_API_KEY first)
 python -m governor.mcp_server  # governor as MCP server (GOVERNOR_BUDGET env)
@@ -87,6 +92,39 @@ python -m governor.mcp_server  # governor as MCP server (GOVERNOR_BUDGET env)
 For the MCP server, run it from `src/` (or `pip install -e .`); budget and
 reserve come from `GOVERNOR_BUDGET` / `GOVERNOR_RESERVE` env vars. ADK agents
 can mount its tools with `MCPToolset` (see the module docstring).
+
+## Any API, local models included
+
+The governor is provider-agnostic at every layer:
+
+- **The plugin** never talks to a provider: it reads the usage metadata ADK
+  normalizes for whatever model the agents run on. Point the demo at any API
+  or local server through ADK's LiteLLM bridge (`pip install litellm` —
+  optional and demo-only; pin the version, see the [supply-chain
+  posture](security/threat_model.md#supply-chain-and-deployment-posture)):
+
+  ```bash
+  python demo/run_adk_demo.py --model openai/gpt-4o-mini      # any API
+  python demo/run_adk_demo.py --model ollama_chat/llama3.1    # fully local
+  ```
+
+- **The judge** hears appeals on any OpenAI-compatible endpoint — OpenAI,
+  gateways (LiteLLM proxy, OpenRouter), or local servers (Ollama, LM Studio,
+  vLLM) — via three env vars, stdlib-only, no new dependency:
+
+  ```bash
+  export GOVERNOR_JUDGE_BASE_URL=http://localhost:11434/v1   # Ollama
+  export GOVERNOR_JUDGE_MODEL=llama3.1
+  # GOVERNOR_JUDGE_API_KEY only if the endpoint wants one
+  ```
+
+  Justice on a small local model while the governed team runs on a capable
+  hosted one is a deliberate configuration, not a compromise: the ruling is
+  one cheap text-only prompt. Without any provider configured the judge
+  abstains and the desk's mechanical policy decides, as before.
+
+- **The MCP server** (above) already speaks to any runtime on the standard
+  protocol — model choice never reached it in the first place.
 
 ## Course concepts demonstrated (capstone rubric)
 
