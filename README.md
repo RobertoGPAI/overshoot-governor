@@ -53,6 +53,16 @@ for spawning-capable deployments.
    quota-allocating coordinator (*nemo iudex in causa sua*) — whose hearings
    are themselves billed to the ledger: justice isn't free, so appeal spam
    exhausts the hearing budget, never the mission's.
+5. **The landing** (found live, by a behavioral experiment run over this
+   plugin) — inside a single ADK invocation, a short-circuited denial IS the
+   agent's final message: a bare wall *decapitates* the mission (26/26
+   governed runs delivered the governor's own 400-char denial text as their
+   "report", stranding 65% of the budget; appeals were unreachable). The
+   governor now keeps a **dynamic runway** — landing costs one more read of
+   a context that grows every turn — and at the point of no return admits
+   one last tool-stripped call capped to what still fits. Validated live:
+   92.5% of budget used, a real deliverable, zero overshoot, and the wall
+   never even has to say no.
 
 ## Layout
 
@@ -63,7 +73,7 @@ src/governor/adk_plugin.py   BudgetGovernorPlugin (ADK 2.x Runner plugin)
 src/governor/mcp_server.py   the same ledger as an MCP server (cross-runtime)
 sim/simulation.py      the four experiments (python sim/simulation.py)
 demo/run_adk_demo.py   live A/B demo: meter on vs off (Gemini, any API, or local)
-tests/                 15 unit tests (races, atomicity, leases, appeals, judge, MCP)
+tests/                 26 unit tests (races, atomicity, leases, appeals, judge, MCP, landing, calibration)
 security/threat_model.md     STRIDE analysis (SKILLSTRIDE methodology)
 docs/                  Kaggle writeup draft + video script
 build_notebook.py      regenerates the Kaggle notebook from these sources
@@ -73,7 +83,7 @@ build_notebook.py      regenerates the Kaggle notebook from these sources
 
 ```bash
 pip install -r requirements.txt
-python -m pytest tests -q      # 15 tests
+python -m pytest tests -q      # 26 tests
 python sim/simulation.py       # runs the 4 experiments, saves figures/
 python demo/run_adk_demo.py    # live ADK demo (set GOOGLE_API_KEY or GEMINI_API_KEY first)
 python -m governor.mcp_server  # governor as MCP server (GOVERNOR_BUDGET env)
