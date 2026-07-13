@@ -3,6 +3,7 @@ Allows the parent agent to manage a persistent budget across sub-agent calls.
 """
 
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -66,9 +67,11 @@ def reserve_tokens(amount: int):
     ledger.spent = state["spent"]
     ledger.committed = state["committed"]
     
-    res = ledger.try_reserve(amount)
+    # try_reserve is a coroutine: unawaited it returns a (truthy) coroutine
+    # object, so the DENIED branch was unreachable and nothing was reserved.
+    res = asyncio.run(ledger.try_reserve(amount))
     if res:
-        save_state(ledger)
+        save_state(ledger, mission=state.get("mission"))
         print(f"Reserved {amount} tokens. New Available: {ledger.available}")
     else:
         print("DENIED: Insufficient budget.")
@@ -85,10 +88,11 @@ def settle_tokens(actual: int):
     # We simplify settlement for the CLI: just add to spent and clear commitment
     # In a real scenario we'd track reservation IDs.
     ledger.spent += actual
-    # This is a naive settlement for the CLI tool
-    # we assume the commitment was for the previous call
-    # We'll just let the parent agent handle the balance.
-    save_state(ledger)
+    # Naive settlement, one in-flight reservation at a time: the commitment
+    # belongs to the previous reserve, so release it -- without this it
+    # accumulated across cycles and strangled available with phantom holds.
+    ledger.committed = 0
+    save_state(ledger, mission=state.get("mission"))
     print(f"Settled {actual} tokens. Total Spent: {ledger.spent}")
 
 if __name__ == "__main__":
@@ -97,6 +101,7 @@ if __name__ == "__main__":
 
     init_p = subparsers.add_parser("init")
     init_p.add_argument("budget", type=int)
+    init_p.add_argument("--mission", default="")
     init_p.add_argument("--reserve", type=float, default=0.1)
     init_p.add_argument("--appeal", type=float, default=0.05)
 
@@ -111,7 +116,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.command == "init":
-        init_budget(args.budget, args.reserve, args.appeal)
+        # init_budget takes (budget, mission, reserve, appeal): the old call
+        # passed three positionals and crashed on the missing fourth.
+        init_budget(args.budget, args.mission, args.reserve, args.appeal)
     elif args.command == "status":
         get_status()
     elif args.command == "reserve":
