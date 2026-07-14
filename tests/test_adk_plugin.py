@@ -23,6 +23,7 @@ from governor.adk_plugin import (
     LANDING_TEXT,
     BudgetGovernorPlugin,
     estimate_input_tokens,
+    output_cap,
 )
 from governor.estimator import OutputEstimator
 
@@ -343,6 +344,149 @@ def test_landing_is_retryable_after_a_provider_error():
         assert plugin.landings == 2
         assert request.config.max_output_tokens >= LANDING_FLOOR
         assert plugin.ledger.overshoot == 0
+
+    asyncio.run(scenario())
+
+
+def test_ordinary_admission_caps_realized_spend():
+    """The wall must be physical, not statistical: an ordinary admission
+    reserves input + p90(output), but the p90 is an estimate and the model
+    bills what it actually writes (observed live: 11 of 26 runs overshot
+    with denied=0 once the estimator warmed up). Every ordinary admission
+    therefore carries max_output_tokens = estimate + tail margin."""
+
+    async def scenario():
+        prior = 1024
+        plugin = BudgetGovernorPlugin(
+            budget=50_000, estimator=OutputEstimator(prior=prior)
+        )
+        request = _request()
+        result = await plugin.before_model_callback(
+            callback_context=_Ctx(), llm_request=request
+        )
+        assert result is None
+        assert plugin.landings == 0
+        # Far from the wall the headroom clamp is slack: the cap is the
+        # reserved output estimate plus the tail margin, nothing else.
+        assert request.config.max_output_tokens == output_cap(prior)
+        assert output_cap(prior) == prior + prior // 2 + 128
+        # The meter still rides along with the cap.
+        assert "Live budget state" in str(request.config.system_instruction)
+
+    asyncio.run(scenario())
+
+
+def test_ordinary_cap_never_exceeds_remaining_headroom():
+    """Near the wall the margin yields to the ledger: even a reply that
+    fills the whole cap must settle inside the ordinary tranche, leaving
+    the appeal tranche and the completion reserve intact."""
+
+    async def scenario():
+        plugin = BudgetGovernorPlugin(
+            budget=20_000, estimator=OutputEstimator(prior=1024)
+        )
+        r = await plugin.ledger.try_reserve(15_500)
+        await plugin.ledger.settle(r, 15_500)
+        headroom = plugin.ledger.available  # ordinary tranche, pre-admission
+        input_estimate = estimate_input_tokens(_request())
+
+        request = _request()
+        result = await plugin.before_model_callback(
+            callback_context=_Ctx(), llm_request=request
+        )
+        assert result is None
+        assert plugin.landings == 0
+        cap = request.config.max_output_tokens
+        assert cap < output_cap(1024)  # the clamp bit
+        assert input_estimate + cap == headroom  # ... exactly at the wall
+        # A maximal reply settles with zero overshoot and the tranche intact.
+        reservation, _, _ = plugin._pending["inv-1"].pop()
+        await plugin.ledger.settle(reservation, input_estimate + cap)
+        assert plugin.ledger.available >= 0
+        assert plugin.ledger.overshoot == 0
+
+    asyncio.run(scenario())
+
+
+def test_appealed_cap_clamps_to_the_priority_tranche():
+    """An appealed call may spend the appeal tranche, never the completion
+    reserve: its cap clamps against priority headroom, not the (already
+    exhausted) ordinary tranche."""
+
+    async def scenario():
+        plugin = BudgetGovernorPlugin(
+            budget=20_000, estimator=OutputEstimator(prior=1024)
+        )
+        r = await plugin.ledger.try_reserve(16_500)
+        await plugin.ledger.settle(r, 16_500)
+        text = ("APPEAL: this call is the mission's critical path" + " x" * 200)[:400]
+        input_estimate = estimate_input_tokens(_request(text=text))
+        assert input_estimate + 1024 > plugin.ledger.available  # ordinary: denied
+        headroom = plugin.ledger.priority_available
+
+        request = _request(text=text)
+        result = await plugin.before_model_callback(
+            callback_context=_Ctx(), llm_request=request
+        )
+        assert result is None
+        assert plugin.appeals.log.granted == 1
+        cap = request.config.max_output_tokens
+        assert input_estimate + cap == headroom  # reserve stays inviolate
+        reservation, _, _ = plugin._pending["inv-1"].pop()
+        await plugin.ledger.settle(reservation, input_estimate + cap)
+        assert plugin.ledger.overshoot == 0
+
+    asyncio.run(scenario())
+
+
+def test_landing_cap_is_the_allowance_not_the_ordinary_expression():
+    """The landing path already caps at whatever still fits; the ordinary
+    cap must not touch it."""
+
+    async def scenario():
+        events = []
+        plugin = BudgetGovernorPlugin(
+            budget=2000,
+            estimator=OutputEstimator(prior=5000),
+            event_sink=events.append,
+        )
+        request = _request()
+        result = await plugin.before_model_callback(
+            callback_context=_Ctx(), llm_request=request
+        )
+        assert result is None
+        assert [e["event"] for e in events] == ["landing"]  # no "admitted"
+        assert request.config.max_output_tokens == events[0]["allowance"]
+
+    asyncio.run(scenario())
+
+
+def test_estimator_learns_billed_output_including_thoughts():
+    """Thinking bills as output and (on Gemini) the output cap governs
+    thoughts + text together: the estimator must learn the billed sum, or
+    every thinking call under-reserves by its thoughts (observed live on
+    Gemma: text ~21, thoughts ~150+, both billed -- the exact size of the
+    recorded overshoots)."""
+
+    async def scenario():
+        plugin = BudgetGovernorPlugin(
+            budget=500_000,
+            estimator=OutputEstimator(prior=1024, min_samples=1),
+        )
+        await plugin.before_model_callback(
+            callback_context=_Ctx(), llm_request=_request()
+        )
+        usage = types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=600,
+            candidates_token_count=21,
+            thoughts_token_count=150,
+            total_token_count=771,
+        )
+        await plugin.after_model_callback(
+            callback_context=_Ctx(),
+            llm_response=LlmResponse(usage_metadata=usage),
+        )
+        assert plugin.estimator.predict("worker") == 171
 
     asyncio.run(scenario())
 
