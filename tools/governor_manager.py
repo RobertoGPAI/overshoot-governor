@@ -46,27 +46,28 @@ def get_status():
     if not state:
         print("No budget initialized. Use 'init' first.")
         return
-    
+
     # Reconstruct a temporary ledger to get calculated properties
     ledger = AtomicLedger(
-        budget=state["budget"], 
-        reserve_fraction=state["reserve_fraction"], 
+        budget=state["budget"],
+        reserve_fraction=state["reserve_fraction"],
         appeal_fraction=state["appeal_fraction"]
     )
     ledger.spent = state["spent"]
     ledger.committed = state["committed"]
-    
+
     print(f"Mission: {state.get('mission', 'Not set')}")
     print(f"Budget: {ledger.budget} | Spent: {ledger.spent} | Available: {ledger.available} | Committed: {ledger.committed}")
 
 def reserve_tokens(amount: int):
     state = load_state()
-    if not state: return
-    
+    if not state:
+        return
+
     ledger = AtomicLedger(budget=state["budget"], reserve_fraction=state["reserve_fraction"], appeal_fraction=state["appeal_fraction"])
     ledger.spent = state["spent"]
     ledger.committed = state["committed"]
-    
+
     # try_reserve is a coroutine: unawaited it returns a (truthy) coroutine
     # object, so the DENIED branch was unreachable and nothing was reserved.
     res = asyncio.run(ledger.try_reserve(amount))
@@ -79,12 +80,13 @@ def reserve_tokens(amount: int):
 
 def settle_tokens(actual: int):
     state = load_state()
-    if not state: return
-    
+    if not state:
+        return
+
     ledger = AtomicLedger(budget=state["budget"], reserve_fraction=state["reserve_fraction"], appeal_fraction=state["appeal_fraction"])
     ledger.spent = state["spent"]
     ledger.committed = state["committed"]
-    
+
     # We simplify settlement for the CLI: just add to spent and clear commitment
     # In a real scenario we'd track reservation IDs.
     ledger.spent += actual
@@ -106,10 +108,10 @@ if __name__ == "__main__":
     init_p.add_argument("--appeal", type=float, default=0.05)
 
     subparsers.add_parser("status")
-    
+
     res_p = subparsers.add_parser("reserve")
     res_p.add_argument("amount", type=int)
-    
+
     set_p = subparsers.add_parser("settle")
     set_p.add_argument("actual", type=int)
 
