@@ -32,7 +32,9 @@ class _Ctx:
     """Duck-typed CallbackContext: the plugin reads two attributes."""
 
     agent_name = "worker"
-    invocation_id = "inv-1"
+
+    def __init__(self, invocation_id: str = "inv-1") -> None:
+        self.invocation_id = invocation_id
 
 
 def _request(text: str = "x" * 400, with_tools: bool = False) -> LlmRequest:
@@ -343,6 +345,93 @@ def test_landing_is_retryable_after_a_provider_error():
         assert result is None, "retry after a dropped landing was denied"
         assert plugin.landings == 2
         assert request.config.max_output_tokens >= LANDING_FLOOR
+        assert plugin.ledger.overshoot == 0
+
+    asyncio.run(scenario())
+
+
+def test_leaked_reservation_reconciled_on_the_retry_invocation():
+    """Replay of the 2026-07-14 live leak (email #3, budget 2962).
+
+    Reservation A's model call died during response streaming -- neither
+    after_model_callback nor on_model_error_callback fired -- and the retry
+    arrived as a NEW invocation. A's 546 committed tokens were held forever:
+    reservation B came and was cancelled cleanly via on_model_error, but the
+    landing later priced itself against headroom shrunk by the leak (964
+    tokens of allowance where ~1500 fit). A new invocation of the same agent
+    is proof the old one can no longer settle: A must be cancelled then."""
+
+    async def scenario():
+        events = []
+        plugin = BudgetGovernorPlugin(
+            budget=2962,
+            estimator=OutputEstimator(prior=400),
+            event_sink=events.append,
+        )
+        # inv-1: reservation A admitted, then its call dies silently -- no
+        # settle, no error callback, nothing pops it.
+        assert await plugin.before_model_callback(
+            callback_context=_Ctx("inv-1"), llm_request=_request()
+        ) is None
+        leaked = plugin.ledger.committed
+        assert leaked > 0
+
+        # inv-2 (the retry): admitting B must first reconcile A away, so
+        # committed reflects ONE live reservation, not two.
+        assert await plugin.before_model_callback(
+            callback_context=_Ctx("inv-2"), llm_request=_request()
+        ) is None
+        reconciled = [e for e in events if e["event"] == "reconciled"]
+        assert [e["amount"] for e in reconciled] == [leaked]
+        assert plugin.ledger.committed == plugin._pending["inv-2"][0][0].amount
+
+        # B's call fails loudly; on_model_error cancels it as before.
+        await plugin.on_model_error_callback(
+            callback_context=_Ctx("inv-2"),
+            llm_request=_request(),
+            error=RuntimeError("ServerError"),
+        )
+        assert plugin.ledger.committed == 0
+
+        # inv-3: a context large enough to trip the runway check. With the
+        # leak reconciled the landing prices its allowance against the FULL
+        # budget -- the exact expression the unleaked ledger would grant.
+        request = _request(text="x" * 4000)
+        assert await plugin.before_model_callback(
+            callback_context=_Ctx("inv-3"), llm_request=request
+        ) is None
+        assert plugin.landings == 1
+        input_estimate = (
+            estimate_input_tokens(_request(text="x" * 4000))
+            + len(LANDING_TEXT) // 4 + 8
+        )
+        expected = (
+            plugin.ledger.budget - input_estimate
+            - (input_estimate // 10 + 128)
+        )
+        assert request.config.max_output_tokens == expected
+        assert plugin.ledger.overshoot == 0
+
+    asyncio.run(scenario())
+
+
+def test_after_run_sweeps_what_the_invocation_left_pending():
+    """The leak can also happen on the mission's LAST call, where no later
+    admission exists to reconcile it: invocation end must sweep whatever is
+    still pending (and drop the invocation's _pending slot)."""
+
+    async def scenario():
+        plugin = BudgetGovernorPlugin(
+            budget=50_000, estimator=OutputEstimator(prior=1024)
+        )
+        assert await plugin.before_model_callback(
+            callback_context=_Ctx("inv-1"), llm_request=_request()
+        ) is None
+        assert plugin.ledger.committed > 0
+
+        await plugin.after_run_callback(invocation_context=_Ctx("inv-1"))
+        assert plugin.ledger.committed == 0
+        assert "inv-1" not in plugin._pending
         assert plugin.ledger.overshoot == 0
 
     asyncio.run(scenario())

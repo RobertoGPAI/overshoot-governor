@@ -52,6 +52,7 @@ from collections import defaultdict
 from typing import Optional
 
 from google.adk.agents.callback_context import CallbackContext
+from google.adk.agents.invocation_context import InvocationContext
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
@@ -182,7 +183,10 @@ class BudgetGovernorPlugin(BasePlugin):
         self._event_sink = event_sink
         # (reservation, agent key, raw chars-based input estimate) -- the raw
         # estimate is kept so settle time can calibrate it against the
-        # provider's true prompt count.
+        # provider's true prompt count. Keyed by invocation_id, because a
+        # reservation can only be settled by the invocation that made it:
+        # anything still pending once that invocation is over is a leak and
+        # must be reconciled (see _reconcile_stale / after_run_callback).
         self._pending: dict[str, list[tuple[Reservation, str, int]]] = defaultdict(list)
 
     def _emit(self, kind: str, **data) -> None:
@@ -247,10 +251,42 @@ class BudgetGovernorPlugin(BasePlugin):
         reservation = await self.ledger.try_reserve(headroom)
         return reservation, allowance if reservation else 0
 
+    async def _reconcile_stale(self, key: str, current_invocation: str) -> None:
+        """Cancel reservations this agent left pending in past invocations.
+
+        A model call can die without firing ANY settlement hook -- observed
+        live: the provider error surfaced while the response stream was being
+        iterated, outside on_model_error_callback's reach, and the retry
+        arrived as a fresh invocation. The orphaned reservation then holds
+        its committed tokens until process exit, and the landing pays for it
+        (964 tokens of allowance granted where ~1500 actually fit). An agent
+        runs one invocation at a time, so this agent showing up under a new
+        invocation_id is proof the old invocation's pending reservations can
+        never settle: cancel them before this admission is priced. Should a
+        cancelled call somehow settle after all, the ledger still records
+        the spend -- the settled flag only guards the committed release.
+        """
+        for inv_id, entries in list(self._pending.items()):
+            if inv_id == current_invocation:
+                continue
+            stale = [e for e in entries if e[1] == key]
+            if not stale:
+                continue
+            kept = [e for e in entries if e[1] != key]
+            if kept:
+                self._pending[inv_id] = kept
+            else:
+                del self._pending[inv_id]
+            for reservation, _, _ in stale:
+                await self.ledger.cancel(reservation)
+                self._emit("reconciled", agent=key, amount=reservation.amount,
+                           stale_invocation=inv_id)
+
     async def before_model_callback(
         self, *, callback_context: CallbackContext, llm_request: LlmRequest
     ) -> Optional[LlmResponse]:
         key = callback_context.agent_name
+        await self._reconcile_stale(key, callback_context.invocation_id)
         raw_input = estimate_input_tokens(llm_request)
         input_estimate = int(raw_input * self.calibrator.factor(key))
         output_estimate = self.estimator.predict(key)
@@ -460,6 +496,22 @@ class BudgetGovernorPlugin(BasePlugin):
                        was_landing=reservation is self._landing_reservation,
                        error=type(error).__name__)
         return None
+
+    async def after_run_callback(
+        self, *, invocation_context: InvocationContext
+    ) -> None:
+        """Invocation end: whatever it left pending, it can no longer settle.
+
+        The belt to _reconcile_stale's suspenders -- that path only fires if
+        the agent runs again, and the leak may happen on the mission's last
+        call. Also drops the invocation's (usually empty) _pending slot, so
+        the dict does not grow one key per invocation forever.
+        """
+        entries = self._pending.pop(invocation_context.invocation_id, [])
+        for reservation, key, _ in entries:
+            await self.ledger.cancel(reservation)
+            self._emit("reconciled", agent=key, amount=reservation.amount,
+                       stale_invocation=invocation_context.invocation_id)
 
     def report(self) -> str:
         led = self.ledger
