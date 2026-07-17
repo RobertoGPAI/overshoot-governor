@@ -43,6 +43,21 @@ class OutputEstimator:
         """Feed the actual output token count observed at settle time."""
         self._history[key].append(actual)
 
+    def snapshot(self) -> dict:
+        """The estimator's learned state, JSON-serializable.
+
+        An honest budget is honest GIVEN a warm estimator (observed live:
+        a cold start at a validated budget produced 22/22 turn-1 landings).
+        The calibration ficha must therefore carry the warmth it was
+        measured with, and production must be able to inherit it.
+        """
+        return {"history": {k: list(v) for k, v in self._history.items()}}
+
+    def restore(self, state: dict) -> None:
+        for key, samples in (state.get("history") or {}).items():
+            for s in samples:
+                self._history[key].append(s)
+
 
 class ThoughtsEstimator(OutputEstimator):
     """Rolling per-key quantile estimator for thinking tokens.
@@ -151,3 +166,18 @@ class InputCalibrator:
             self._ratios[key].append(actual / estimated)
         else:
             self._overheads[key].append(actual - estimated)
+
+    def snapshot(self) -> dict:
+        """Learned slope and intercept samples, JSON-serializable."""
+        return {
+            "ratios": {k: list(v) for k, v in self._ratios.items()},
+            "overheads": {k: list(v) for k, v in self._overheads.items()},
+        }
+
+    def restore(self, state: dict) -> None:
+        for key, samples in (state.get("ratios") or {}).items():
+            for s in samples:
+                self._ratios[key].append(s)
+        for key, samples in (state.get("overheads") or {}).items():
+            for s in samples:
+                self._overheads[key].append(s)
