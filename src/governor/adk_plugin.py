@@ -59,7 +59,7 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
 from .appeals import AppealsDesk
-from .estimator import InputCalibrator, OutputEstimator
+from .estimator import InputCalibrator, OutputEstimator, ThoughtsEstimator
 from .judge import MissionJudge
 from .ledger import AtomicLedger, Reservation
 
@@ -164,6 +164,11 @@ class BudgetGovernorPlugin(BasePlugin):
         )
         self.estimator = estimator or OutputEstimator()
         self.calibrator = InputCalibrator()
+        # Reasoning models bill thinking tokens inside the output cap
+        # (observed live: a landing whose whole allowance went to thoughts,
+        # zero response tokens -- the landing became the failure). The toll
+        # is learned per agent from settle-time usage, prior zero.
+        self.thoughts = ThoughtsEstimator()
         self.visibility = visibility
         self.mission = mission
         self.landings = 0
@@ -216,13 +221,13 @@ class BudgetGovernorPlugin(BasePlugin):
 
     async def _try_landing(
         self, key: str, llm_request: LlmRequest
-    ) -> tuple[Reservation | None, int]:
+    ) -> tuple[Reservation | None, int, int]:
         """Admit one final, output-capped call against the completion reserve.
 
-        Returns ``(reservation, allowance)``; a ``None`` reservation means not
-        even the landing fits and the terminal denial should fire. Called at
-        most once per ledger: ``begin_finalization`` is idempotent and the
-        caller gates on ``ledger.finalizing``.
+        Returns ``(reservation, allowance, thoughts_toll)``; a ``None``
+        reservation means not even the landing fits and the terminal denial
+        should fire. Called at most once per ledger: ``begin_finalization``
+        is idempotent and the caller gates on ``ledger.finalizing``.
         """
         self.ledger.begin_finalization()
         # The landing instruction is itself appended to the request and
@@ -246,10 +251,19 @@ class BudgetGovernorPlugin(BasePlugin):
         # (an oversized margin IS a decapitation, via the floor check).
         margin = input_estimate // 10 + 128
         allowance = headroom - input_estimate - margin
-        if allowance < LANDING_FLOOR:
-            return None, 0
+        # On reasoning models the allowance is not all speech: thinking
+        # tokens bill against the same output cap before any response text
+        # exists (observed live: allowance 2041, thoughts 2038, output 0 --
+        # the landing became the failure). The floor must survive the toll:
+        # a runway you cannot speak on is not a runway, and a landing whose
+        # allowance the known toll consumes is better spent as the terminal
+        # denial. Non-reasoning agents have a toll of zero and keep the old
+        # arithmetic exactly.
+        thoughts_toll = self.thoughts.predict(key)
+        if allowance - thoughts_toll < LANDING_FLOOR:
+            return None, 0, thoughts_toll
         reservation = await self.ledger.try_reserve(headroom)
-        return reservation, allowance if reservation else 0
+        return reservation, allowance if reservation else 0, thoughts_toll
 
     async def _reconcile_stale(self, key: str, current_invocation: str) -> None:
         """Cancel reservations this agent left pending in past invocations.
@@ -294,18 +308,27 @@ class BudgetGovernorPlugin(BasePlugin):
 
         reservation = None
         allowance = 0
+        thoughts_toll = self.thoughts.predict(key)
         # Runway check, on every admission: landing costs one more read of
         # the context, and the context grows every turn -- waiting for a
         # denial can strand the mission past the point where not even the
         # landing's input fits (observed live: 3.1k left against a 6.5k
         # context). Keep enough fuel to reach the runway: if admitting this
         # call would leave less than the NEXT landing costs (today's context
-        # plus this call's output, margin, floor), land now instead.
+        # plus this call's output, margin, floor -- and the thinking toll,
+        # for agents whose settle history shows one: reasoning models bill
+        # thoughts against the landing's own output cap, so the runway must
+        # carry room to think AND room to speak). A reasoning agent lands
+        # earlier than a non-reasoning one, which is the correct trade:
+        # better early with room to speak than on time with room only to
+        # think.
         headroom = self.ledger.budget - self.ledger.spent - self.ledger.committed
         next_input = input_estimate + output_estimate
-        runway = next_input + next_input // 10 + 128 + LANDING_FLOOR
+        runway = next_input + next_input // 10 + 128 + LANDING_FLOOR + thoughts_toll
         if headroom - estimate < runway:
-            reservation, allowance = await self._try_landing(key, llm_request)
+            reservation, allowance, thoughts_toll = await self._try_landing(
+                key, llm_request
+            )
 
         if reservation is None:
             reservation = await self.ledger.try_reserve(estimate)
@@ -326,7 +349,9 @@ class BudgetGovernorPlugin(BasePlugin):
             # live -- stripping declarations does not strip the pattern)
             # gets a shorter runway each time, until the floor ends it.
             # Headroom shrinks monotonically, so this terminates.
-            reservation, allowance = await self._try_landing(key, llm_request)
+            reservation, allowance, thoughts_toll = await self._try_landing(
+                key, llm_request
+            )
         if reservation is None:
             # Short-circuit: the model is never called. The refusal text tells
             # the agent to land with what it has, or appeal once with cause.
@@ -373,7 +398,8 @@ class BudgetGovernorPlugin(BasePlugin):
             ]
             self._emit("landing", agent=key, allowance=allowance,
                        cap=llm_request.config.max_output_tokens,
-                       reserved=reservation.amount)
+                       reserved=reservation.amount,
+                       thoughts_toll=thoughts_toll)
         else:
             # The reservation bounded EXPECTED spend; nothing yet bounds
             # REALIZED spend -- an output that runs past its p90 estimate
@@ -430,18 +456,22 @@ class BudgetGovernorPlugin(BasePlugin):
         reservation, key, raw_input = stack.pop()
 
         usage = llm_response.usage_metadata
+        thoughts = getattr(usage, "thoughts_token_count", None) if usage else None
         if usage is not None and usage.total_token_count:
             actual = usage.total_token_count
             output = usage.candidates_token_count or 0
-            thoughts = getattr(usage, "thoughts_token_count", None)
             # Thinking bills as output, and on Gemini max_output_tokens
             # governs thoughts + text together. The estimator must learn
             # that billed sum: a p90 of the visible text alone leaves every
             # thinking call under-reserved by its thoughts (observed live
             # on Gemma: text ~21, thoughts ~150+, both billed -- the exact
             # size of the recorded overshoots), and a cap sized from text
-            # alone would strangle the thinking before the answer.
+            # alone would strangle the thinking before the answer. The
+            # thoughts estimator learns the toll separately: the landing
+            # needs the SPLIT (room to think vs room to speak), the wall
+            # needs the SUM.
             self.estimator.update(key, output + (thoughts or 0))
+            self.thoughts.update(key, thoughts)
             prompt = getattr(usage, "prompt_token_count", None)
             if prompt:
                 self.calibrator.update(key, raw_input, prompt)
