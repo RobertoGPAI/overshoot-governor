@@ -819,3 +819,46 @@ def test_calibrator_overhead_never_shrinks_an_estimate():
     cal.update("a", estimated=410, actual=320)
     assert cal.overhead("a") == 0
     assert cal.calibrate("a", 400) == 400
+
+
+def test_estimator_state_round_trips():
+    """G7: the ficha must carry the warmth a budget was measured with (a
+    cold start at a validated budget produced 22/22 turn-1 landings), so
+    every estimator serializes its learned state and a fresh instance
+    restored from it predicts identically."""
+    import json as _json
+
+    from governor.estimator import InputCalibrator, ThoughtsEstimator
+
+    est = OutputEstimator(prior=700, min_samples=2)
+    for v in (120, 180, 240, 300, 210):
+        est.update("worker", v)
+    cal = InputCalibrator(min_samples=2)
+    cal.update("worker", estimated=200, actual=430)   # overhead sample
+    cal.update("worker", estimated=210, actual=445)   # overhead sample
+    cal.update("worker", estimated=700, actual=560)   # ratio sample
+    cal.update("worker", estimated=800, actual=640)   # ratio sample
+    th = ThoughtsEstimator()
+    th.update("worker", 402)
+
+    blob = _json.dumps({
+        "output": est.snapshot(),
+        "calibrator": cal.snapshot(),
+        "thoughts": th.snapshot(),
+    })  # must be JSON-serializable end to end
+    state = _json.loads(blob)
+
+    est2 = OutputEstimator(prior=700, min_samples=2)
+    est2.restore(state["output"])
+    cal2 = InputCalibrator(min_samples=2)
+    cal2.restore(state["calibrator"])
+    th2 = ThoughtsEstimator()
+    th2.restore(state["thoughts"])
+
+    assert est2.predict("worker") == est.predict("worker")
+    assert cal2.factor("worker") == cal.factor("worker")
+    assert cal2.overhead("worker") == cal.overhead("worker")
+    assert th2.predict("worker") == 402
+    # And the restored twin keeps LEARNING on top of the inherited state.
+    cal2.update("worker", estimated=220, actual=470)
+    assert len(cal2._overheads["worker"]) == 3
