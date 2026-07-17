@@ -779,3 +779,43 @@ def test_estimator_does_not_learn_the_landing():
         assert plugin.thoughts.predict("worker") == 1214
 
     asyncio.run(scenario())
+
+
+def test_calibrator_learns_the_overhead_from_the_takeoff():
+    """The affine calibrator, replaying the V2 accounting leak (rag h1,
+    budget 1050): every request in a micro-budget task sits under
+    min_input, so the ratio-only calibrator never trained and the wall
+    leaked by exactly the fixed per-request cost (23/25 overshoots,
+    median 20 tokens). Small samples now train the intercept -- the
+    takeoff teaches the overhead, the cruise teaches the slope."""
+    from governor.estimator import InputCalibrator
+
+    cal = InputCalibrator(min_samples=2)
+    assert cal.overhead("a") == 0  # no evidence, no tax
+    assert cal.calibrate("a", 253) == 253  # old behavior, byte for byte
+    # Two overhead-dominated settles, the live shape (estimated vs actual).
+    cal.update("a", estimated=253, actual=471)
+    cal.update("a", estimated=280, actual=490)
+    assert cal.factor("a") == 1.0  # small samples still never touch the slope
+    assert cal.overhead("a") == 214  # median of (218, 210)
+    assert cal.calibrate("a", 253) == 253 + 214  # the leak, now reserved
+    # The 3.14x incident stays fixed: that takeoff sample now teaches the
+    # intercept instead of poisoning the ratio, and a later large estimate
+    # is corrected by its slope plus a bounded overhead -- never tripled.
+    cal2 = InputCalibrator(min_samples=1)
+    cal2.update("b", estimated=186, actual=585)
+    assert cal2.factor("b") == 1.0
+    assert cal2.calibrate("b", 7000) == 7000 + 399  # not 21,980
+
+
+def test_calibrator_overhead_never_shrinks_an_estimate():
+    """A negative residual on a small request is slope information leaking
+    in (an overcounting heuristic), not a negative fixed cost: corrections
+    of that sign belong to factor, and the additive term clamps at zero."""
+    from governor.estimator import InputCalibrator
+
+    cal = InputCalibrator(min_samples=2)
+    cal.update("a", estimated=400, actual=300)
+    cal.update("a", estimated=410, actual=320)
+    assert cal.overhead("a") == 0
+    assert cal.calibrate("a", 400) == 400

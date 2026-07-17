@@ -76,38 +76,44 @@ class ThoughtsEstimator(OutputEstimator):
 
 
 class InputCalibrator:
-    """Rolling correction factor for the chars-per-token input heuristic.
+    """Affine correction for the chars-per-token input heuristic.
 
     A constant like chars//4 embeds a language and a tokenizer (English,
     ~4 chars/token); real tokenizers differ in both directions -- Spanish
-    prose runs ~3.5, Llama-family tokenizers on structured text ~6. Both
-    errors are harmful: undercounting risks overshoot, overcounting closes
-    the landing window early (observed live: a mission force-landed on
-    turn 2 with 93% of its budget unspent). At settle time the provider
-    reports the true prompt token count; the calibrator learns
-    actual/estimated per key, and the estimate stops assuming.
+    prose runs ~3.5, Llama-family tokenizers on structured text ~6. And a
+    real prompt is not just content: chat template, tool declarations and
+    instructions appended after estimation add a fixed per-request cost the
+    heuristic never sees. The true relation is affine, not proportional:
+
+        actual  ~=  overhead(key)  +  factor(key) * estimated
+
+    Each parameter is learned from the samples that carry its signal.
+    LARGE requests are slope-dominated and train the ratio (a small sample
+    once taught 3.14x from a 186-vs-585 first turn and tripled every later
+    estimate -- the takeoff filter was born there). SMALL requests are
+    overhead-dominated and train the intercept (with only the ratio, a
+    micro-budget task never trains at all: every request sits under
+    ``min_input``, the estimate underruns by the fixed cost, and the wall
+    leaks by exactly that much -- observed live as 23/25 accounting
+    overshoots, median 20 tokens, at budget 1050). The takeoff teaches the
+    overhead; the cruise teaches the slope. No sample is wasted, and no
+    parameter is learned from the samples that would poison it.
     """
 
     def __init__(
         self, window: int = 50, min_samples: int = 2, min_input: int = 512
     ) -> None:
         self.min_samples = min_samples
-        # Small requests are dominated by fixed overhead the heuristic never
-        # sees (chat template, tool declarations, instructions appended after
-        # estimation): their ratios measure the takeoff, not the cruise.
-        # Observed live: a 186-token estimate against a 585-token prompt
-        # taught the calibrator 3.14x and the very next admission was denied
-        # at triple its true cost. Only slope-dominated samples train.
         self.min_input = min_input
         self._ratios: dict[str, deque[float]] = defaultdict(
             lambda: deque(maxlen=window)
         )
+        self._overheads: dict[str, deque[int]] = defaultdict(
+            lambda: deque(maxlen=window)
+        )
 
-    def factor(self, key: str) -> float:
-        samples = self._ratios.get(key)
-        if not samples or len(samples) < self.min_samples:
-            return 1.0  # trust the heuristic until evidence arrives
-        ordered = sorted(samples)
+    @staticmethod
+    def _median(ordered: list) -> float:
         mid = len(ordered) // 2
         if len(ordered) % 2:
             return ordered[mid]
@@ -115,6 +121,33 @@ class InputCalibrator:
         # crowns the larger of two, and with two samples that IS the max.
         return (ordered[mid - 1] + ordered[mid]) / 2
 
+    def factor(self, key: str) -> float:
+        samples = self._ratios.get(key)
+        if not samples or len(samples) < self.min_samples:
+            return 1.0  # trust the heuristic until evidence arrives
+        return self._median(sorted(samples))
+
+    def overhead(self, key: str) -> int:
+        """Learned per-request fixed cost, in tokens. Zero until evidence.
+
+        Clamped non-negative: a negative residual on a small request means
+        the heuristic overcounted the content, which is slope information
+        leaking in -- corrections of that sign belong to ``factor``, and an
+        additive term must never shrink an estimate below the heuristic.
+        """
+        samples = self._overheads.get(key)
+        if not samples or len(samples) < self.min_samples:
+            return 0
+        return max(0, int(self._median(sorted(samples))))
+
+    def calibrate(self, key: str, estimated: int) -> int:
+        """The affine estimate: what admission should actually reserve."""
+        return int(estimated * self.factor(key)) + self.overhead(key)
+
     def update(self, key: str, estimated: int, actual: int) -> None:
-        if estimated >= self.min_input and actual > 0:
+        if actual <= 0:
+            return
+        if estimated >= self.min_input:
             self._ratios[key].append(actual / estimated)
+        else:
+            self._overheads[key].append(actual - estimated)

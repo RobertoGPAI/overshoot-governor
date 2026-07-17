@@ -234,9 +234,8 @@ class BudgetGovernorPlugin(BasePlugin):
         # billed with it -- charge for it, or the allowance overshoots by
         # exactly the text that grants it. Calibrated like every estimate:
         # an overcounting heuristic closes the landing window early.
-        input_estimate = int(
-            (estimate_input_tokens(llm_request) + len(LANDING_TEXT) // 4 + 8)
-            * self.calibrator.factor(key)
+        input_estimate = self.calibrator.calibrate(
+            key, estimate_input_tokens(llm_request) + len(LANDING_TEXT) // 4 + 8
         )
         headroom = self.ledger.available
         # The landing fills the ledger to the brim, so it has none of the
@@ -302,7 +301,7 @@ class BudgetGovernorPlugin(BasePlugin):
         key = callback_context.agent_name
         await self._reconcile_stale(key, callback_context.invocation_id)
         raw_input = estimate_input_tokens(llm_request)
-        input_estimate = int(raw_input * self.calibrator.factor(key))
+        input_estimate = self.calibrator.calibrate(key, raw_input)
         output_estimate = self.estimator.predict(key)
         estimate = input_estimate + output_estimate
 
