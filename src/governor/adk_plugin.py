@@ -10,8 +10,13 @@ Two intervention levels, deliberately at different Meadows leverage points:
 - Hard enforcement (#8, strengthen the balancing loop): before_model_callback
   atomically reserves ``input_estimate + p90(output)`` against the shared
   ledger and short-circuits the call with a refusal LlmResponse when the
-  reservation is denied. after_model_callback reconciles the reservation with
-  the actual usage_metadata and feeds the estimator.
+  reservation is denied. The reservation bounds *expected* spend; the same
+  admission also bounds *realized* spend by setting ``max_output_tokens`` to
+  the reserved output estimate plus a tail margin, clamped to the tranche
+  headroom left after the input -- an output that runs past its estimate
+  bills anyway, and a ledger that can only record the excess is a meter, not
+  a wall. after_model_callback reconciles the reservation with the actual
+  usage_metadata and feeds the estimator.
 
 - Information flow (#6, the meter in the hallway): when ``visibility`` is on,
   the plugin appends the live budget state -- and the overall ``mission`` --
@@ -108,6 +113,21 @@ def estimate_input_tokens(llm_request: LlmRequest) -> int:
     if config is not None and config.system_instruction:
         chars += len(str(config.system_instruction))
     return chars // 4 + parts_seen * 8
+
+
+def output_cap(output_estimate: int) -> int:
+    """Physical output cap for an ordinary admission.
+
+    The estimator predicts a p90, so by construction ~1 call in 10 runs past
+    it -- capping AT the estimate would truncate exactly those calls. The
+    margin buys out the tail: half again the estimate covers the p90-to-max
+    spread of a well-behaved output distribution, and the 128-token floor
+    keeps small estimates (a warmed-up estimator on a terse agent) from
+    producing caps so tight that ordinary variance truncates the reply.
+    Truncation is still possible -- that is the point of a wall -- but rare,
+    and a truncated turn settles normally, so the mission continues.
+    """
+    return output_estimate + output_estimate // 2 + 128
 
 
 class BudgetGovernorPlugin(BasePlugin):
@@ -289,12 +309,14 @@ class BudgetGovernorPlugin(BasePlugin):
 
         if reservation is None:
             reservation = await self.ledger.try_reserve(estimate)
+        appealed = False
         if reservation is None:
             # Right of appeal (voice): a justified retry may enter the appeal
             # tranche -- never the completion reserve. Rationed and logged.
             justification = self._extract_appeal(llm_request)
             if justification:
                 reservation = await self.appeals.appeal(key, estimate, justification)
+                appealed = reservation is not None
         if reservation is None:
             # Landing protocol: within one invocation a denial is terminal
             # (the short-circuit text becomes the agent's final message), so
@@ -352,25 +374,51 @@ class BudgetGovernorPlugin(BasePlugin):
             self._emit("landing", agent=key, allowance=allowance,
                        cap=llm_request.config.max_output_tokens,
                        reserved=reservation.amount)
-        elif self.visibility:
-            mission_line = (
-                f"Overall mission (the goal your restraint must serve): {self.mission}. "
-                if self.mission
-                else ""
+        else:
+            # The reservation bounded EXPECTED spend; nothing yet bounds
+            # REALIZED spend -- an output that runs past its p90 estimate
+            # bills anyway and the ledger can only record the excess
+            # (observed live: once the estimator warmed to ~200 tokens,
+            # 11 of 26 runs overshot, median 337, with denied=0). Make the
+            # wall physical: cap the output at the reserved estimate plus
+            # the tail margin, clamped so even a maximal reply fits in the
+            # tranche this call was admitted from -- an ordinary call must
+            # leave the appeal tranche and the completion reserve intact,
+            # an appealed call only the completion reserve. The tranche
+            # slack left after this reservation is exactly what the actual
+            # may exceed the estimate by, so cap = estimate + slack is the
+            # wall itself; far from it, the margin governs.
+            slack = (
+                self.ledger.priority_available if appealed
+                else self.ledger.available
             )
-            llm_request.append_instructions([
-                "[BUDGET GOVERNOR] " + mission_line + "Live budget state: "
-                f"{self.ledger.available} tokens available, "
-                f"{self.ledger.committed} committed to in-flight calls, "
-                f"{self.ledger.spent} already spent of {self.ledger.budget}. "
-                "Be economical: prefer short answers, avoid speculative tool "
-                "calls, and do not spawn subagents unless strictly necessary. "
-                "Forgo any action that does not serve the mission; if a "
-                "critical call is denied, you may appeal with "
-                f"'{APPEAL_MARKER} <reason>'."
-            ])
-        if not allowance:
-            self._emit("admitted", agent=key, estimate=estimate)
+            cap = max(1, min(output_cap(output_estimate),
+                             output_estimate + slack))
+            if llm_request.config is None:
+                llm_request.config = types.GenerateContentConfig()
+            prior_cap = llm_request.config.max_output_tokens
+            llm_request.config.max_output_tokens = (
+                min(prior_cap, cap) if prior_cap else cap
+            )
+            if self.visibility:
+                mission_line = (
+                    f"Overall mission (the goal your restraint must serve): {self.mission}. "
+                    if self.mission
+                    else ""
+                )
+                llm_request.append_instructions([
+                    "[BUDGET GOVERNOR] " + mission_line + "Live budget state: "
+                    f"{self.ledger.available} tokens available, "
+                    f"{self.ledger.committed} committed to in-flight calls, "
+                    f"{self.ledger.spent} already spent of {self.ledger.budget}. "
+                    "Be economical: prefer short answers, avoid speculative tool "
+                    "calls, and do not spawn subagents unless strictly necessary. "
+                    "Forgo any action that does not serve the mission; if a "
+                    "critical call is denied, you may appeal with "
+                    f"'{APPEAL_MARKER} <reason>'."
+                ])
+            self._emit("admitted", agent=key, estimate=estimate,
+                       cap=llm_request.config.max_output_tokens)
         return None
 
     async def after_model_callback(
@@ -385,19 +433,27 @@ class BudgetGovernorPlugin(BasePlugin):
         if usage is not None and usage.total_token_count:
             actual = usage.total_token_count
             output = usage.candidates_token_count or 0
-            self.estimator.update(key, output)
+            thoughts = getattr(usage, "thoughts_token_count", None)
+            # Thinking bills as output, and on Gemini max_output_tokens
+            # governs thoughts + text together. The estimator must learn
+            # that billed sum: a p90 of the visible text alone leaves every
+            # thinking call under-reserved by its thoughts (observed live
+            # on Gemma: text ~21, thoughts ~150+, both billed -- the exact
+            # size of the recorded overshoots), and a cap sized from text
+            # alone would strangle the thinking before the answer.
+            self.estimator.update(key, output + (thoughts or 0))
             prompt = getattr(usage, "prompt_token_count", None)
             if prompt:
                 self.calibrator.update(key, raw_input, prompt)
         else:
             actual = reservation.amount  # no metadata: charge the estimate
             output = None
+            thoughts = None
         await self.ledger.settle(reservation, actual)
         was_landing = reservation is self._landing_reservation
         self._emit(
             "settled", agent=key, actual=actual, output=output,
-            thoughts=getattr(usage, "thoughts_token_count", None) if usage else None,
-            was_landing=was_landing,
+            thoughts=thoughts, was_landing=was_landing,
         )
 
         # A landing is a landing: nothing takes off after it. Stripping tool
