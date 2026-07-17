@@ -457,6 +457,7 @@ class BudgetGovernorPlugin(BasePlugin):
 
         usage = llm_response.usage_metadata
         thoughts = getattr(usage, "thoughts_token_count", None) if usage else None
+        was_landing = reservation is self._landing_reservation
         if usage is not None and usage.total_token_count:
             actual = usage.total_token_count
             output = usage.candidates_token_count or 0
@@ -470,7 +471,20 @@ class BudgetGovernorPlugin(BasePlugin):
             # thoughts estimator learns the toll separately: the landing
             # needs the SPLIT (room to think vs room to speak), the wall
             # needs the SUM.
-            self.estimator.update(key, output + (thoughts or 0))
+            #
+            # But only CRUISE calls train the output estimator. A landing's
+            # bill is ceiling-shaped -- capped by the allowance, inflated by
+            # the deliberation the FINAL ALLOWANCE order provokes -- and
+            # feeding it back teaches the estimator landing-sized costs,
+            # which fattens the runway, which forces the next landing: a
+            # self-reinforcing cliff (observed live: 22/22 turn-1 landings
+            # at a budget the staircase had validated, prediction climbing
+            # 700 -> ~1.5k on nothing but its own landings). The calibrator
+            # must not learn the takeoff; the estimator must not learn the
+            # landing. The thoughts estimator DOES learn it: the landing
+            # toll is best measured where it bites.
+            if not was_landing:
+                self.estimator.update(key, output + (thoughts or 0))
             self.thoughts.update(key, thoughts)
             prompt = getattr(usage, "prompt_token_count", None)
             if prompt:
@@ -480,7 +494,6 @@ class BudgetGovernorPlugin(BasePlugin):
             output = None
             thoughts = None
         await self.ledger.settle(reservation, actual)
-        was_landing = reservation is self._landing_reservation
         self._emit(
             "settled", agent=key, actual=actual, output=output,
             thoughts=thoughts, was_landing=was_landing,
