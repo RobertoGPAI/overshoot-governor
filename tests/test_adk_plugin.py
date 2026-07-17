@@ -740,3 +740,42 @@ def test_ordinary_admission_still_gets_the_meter_not_the_landing():
         assert "FINAL ALLOWANCE" not in instructions
 
     asyncio.run(scenario())
+
+
+def test_estimator_does_not_learn_the_landing():
+    """The self-reinforcing cliff, replayed: a landing's bill is
+    ceiling-shaped (capped by the allowance, inflated by the deliberation
+    the FINAL ALLOWANCE order provokes). Feeding it to the output estimator
+    teaches landing-sized costs, fattens the runway, and forces the next
+    landing -- observed live as 22/22 turn-1 landings at a budget the
+    staircase had validated. Cruise calls train; landings do not. The
+    thoughts estimator is the exception: the toll is best measured where
+    it bites."""
+
+    async def scenario():
+        plugin = _plugin()  # budget 2000, prior 5000: first call must land
+        await plugin.before_model_callback(
+            callback_context=_Ctx(), llm_request=_request()
+        )
+        assert plugin.landings == 1
+        before = plugin.estimator.predict("worker")
+        usage = types.GenerateContentResponseUsageMetadata(
+            total_token_count=1866,
+            candidates_token_count=329,
+            thoughts_token_count=1214,
+            prompt_token_count=600,
+        )
+        await plugin.after_model_callback(
+            callback_context=_Ctx(),
+            llm_response=LlmResponse(usage_metadata=usage),
+        )
+        # The landed bill (329 + 1214) must NOT train the output estimator --
+        # checked on the HISTORY, not the prediction: below min_samples the
+        # predictor answers the prior either way, and a poisoned sample would
+        # hide behind it until it is 5 samples deep and self-reinforcing.
+        assert plugin.estimator.predict("worker") == before
+        assert len(plugin.estimator._history.get("worker", [])) == 0
+        # ...but the thoughts estimator must learn the toll it just measured.
+        assert plugin.thoughts.predict("worker") == 1214
+
+    asyncio.run(scenario())
