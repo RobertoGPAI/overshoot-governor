@@ -862,3 +862,39 @@ def test_estimator_state_round_trips():
     # And the restored twin keeps LEARNING on top of the inherited state.
     cal2.update("worker", estimated=220, actual=470)
     assert len(cal2._overheads["worker"]) == 3
+
+
+def test_runway_projects_the_thoughts_reentering_the_context():
+    """G6: the 1/30 decapitation, replayed from the live trail (rag h3,
+    budget 12000, case #7). Call 3 thought 1.311 tokens and the NEXT
+    input grew by ~2.5k -- on ADK/Gemini, thought parts re-enter the
+    history and get re-read. The old projection (input + output) admitted
+    call 4 on a 32-token margin; call 4's real growth blew past it and by
+    call 5 neither an ordinary admission nor the landing's own input fit:
+    terminal denial with 4.5k of budget unspent, DENIAL_TEXT as the
+    mission's reply. The projection must count the toll as context
+    growth, so the runway closes one call earlier -- landed at call 4,
+    delivered, instead of decapitated at call 5."""
+
+    async def scenario():
+        plugin = BudgetGovernorPlugin(
+            budget=12_000, estimator=OutputEstimator(prior=200)
+        )
+        plugin.thoughts.update("worker", 550)  # warm toll, live shape
+        r = await plugin.ledger.try_reserve(3298)
+        await plugin.ledger.settle(r, 3298)     # spent as of call 4
+        request = _request(text="x" * 13_888)   # input_estimate ~3.480
+        result = await plugin.before_model_callback(
+            callback_context=_Ctx(), llm_request=request
+        )
+        # With the toll in the projection, call 4 LANDS (with ~4.7k of
+        # runway) instead of being admitted on a doomed 32-token margin.
+        assert result is None
+        assert plugin.landings == 1, (
+            "call 4 was admitted as ordinary: the projection is blind to "
+            "thought re-reads and the mission will decapitate at call 5"
+        )
+        assert request.config.max_output_tokens >= LANDING_FLOOR
+        assert plugin.ledger.overshoot == 0
+
+    asyncio.run(scenario())
