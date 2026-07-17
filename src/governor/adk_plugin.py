@@ -322,7 +322,16 @@ class BudgetGovernorPlugin(BasePlugin):
         # better early with room to speak than on time with room only to
         # think.
         headroom = self.ledger.budget - self.ledger.spent - self.ledger.committed
-        next_input = input_estimate + output_estimate
+        # The next call's context grows by this call's output AND, on
+        # ADK/Gemini, by its thoughts: thought parts re-enter the history
+        # and get re-read (observed live: a 1.311-thought call grew the
+        # next input by ~2.5k; the projection that ignored it admitted on a
+        # 32-token margin and the mission was decapitated two turns later
+        # -- the window did not jump, the projection was blind to half the
+        # growth). The toll therefore appears TWICE below, for two
+        # different reasons: once as context growth of the next call, once
+        # as the landing's own room to think.
+        next_input = input_estimate + output_estimate + thoughts_toll
         runway = next_input + next_input // 10 + 128 + LANDING_FLOOR + thoughts_toll
         if headroom - estimate < runway:
             reservation, allowance, thoughts_toll = await self._try_landing(
