@@ -44,6 +44,37 @@ class OutputEstimator:
         self._history[key].append(actual)
 
 
+class ThoughtsEstimator(OutputEstimator):
+    """Rolling per-key quantile estimator for thinking tokens.
+
+    Reasoning models spend part of every generation on thoughts: billed like
+    output and, on Gemini-family models, consumed from the very
+    ``max_output_tokens`` cap the landing counts on for the deliverable
+    (observed live: a landed call burned its whole 2041-token allowance on
+    thoughts and emitted zero response tokens). The toll cannot be switched
+    off everywhere -- Gemma 4 rejects ``thinking_budget`` outright -- so it
+    must be budgeted. The prior is zero: non-reasoning models never pay a tax
+    they never incurred. And one observation already trains: thinking is a
+    property of the model, not of the lucky call, so ``min_samples=1``.
+    NVIDIA NIM reports thoughts as ``None``; that is an absence, not a
+    sample of garbage -- it trains as zero.
+    """
+
+    def __init__(
+        self,
+        prior: int = 0,
+        quantile: float = 0.90,
+        window: int = 50,
+        min_samples: int = 1,
+    ) -> None:
+        super().__init__(
+            prior=prior, quantile=quantile, window=window, min_samples=min_samples
+        )
+
+    def update(self, key: str, actual: int | None) -> None:
+        super().update(key, actual or 0)
+
+
 class InputCalibrator:
     """Rolling correction factor for the chars-per-token input heuristic.
 

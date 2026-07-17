@@ -286,6 +286,149 @@ def test_input_calibrator_learns_the_tokenizer():
     assert cal.factor("c") == 1.0  # keys are independent
 
 
+def test_landing_budgets_the_thinking_toll():
+    """Replay of the 2026-07-15 staircase failures (gemma-4-26b-a4b-it).
+
+    Landings failed 5 of 6 while ordinary runs passed 9 of 9: the landed
+    call burned its entire allowance on thinking tokens (case #1: allowance
+    2041, thoughts 2038, output 0) because on Gemini-family models thoughts
+    bill against max_output_tokens before any response text exists. The
+    landing that prevents decapitation was itself the decapitation. Two
+    guarantees pin the fix: a reasoning agent lands EARLIER (the runway
+    carries the toll), and no landing is ever admitted whose allowance the
+    known toll consumes down past the floor.
+    """
+
+    async def scenario():
+        # Same budget, same request; the only difference is a settle history
+        # of ~2k thinking tokens. The reasoning twin must land NOW while the
+        # non-reasoning twin still cruises on ordinary admission -- the toll
+        # widened the runway.
+        events = []
+        reasoning = BudgetGovernorPlugin(
+            budget=4000, estimator=OutputEstimator(prior=1024),
+            event_sink=events.append,
+        )
+        reasoning.thoughts.update("worker", 2038)
+        cruising = BudgetGovernorPlugin(
+            budget=4000, estimator=OutputEstimator(prior=1024)
+        )
+        request = _request()
+        assert await cruising.before_model_callback(
+            callback_context=_Ctx(), llm_request=_request()
+        ) is None
+        assert cruising.landings == 0  # old arithmetic: no landing yet
+        assert await reasoning.before_model_callback(
+            callback_context=_Ctx(), llm_request=request
+        ) is None
+        assert reasoning.landings == 1  # toll-aware arithmetic: land now
+        # The cap that reaches the model leaves the floor intact AFTER the
+        # expected thinking: room to think and still room to speak.
+        toll = reasoning.thoughts.predict("worker")
+        assert request.config.max_output_tokens - toll >= LANDING_FLOOR
+        # The toll is on the record: JSONL reconstructions must show it.
+        landing = next(e for e in events if e["event"] == "landing")
+        assert landing["thoughts_toll"] == 2038
+
+        # Case #1's exact shape -- budget 6000, 2574 already spent, ~1400
+        # input tokens, ~2k learned toll: the allowance that fits (~1.6k)
+        # cannot survive the toll, so the landing must NOT be admitted to
+        # fail. The terminal denial is the documented, honest outcome.
+        doomed = _plugin(budget=6000)
+        doomed.thoughts.update("worker", 2038)
+        r = await doomed.ledger.try_reserve(2574)
+        await doomed.ledger.settle(r, 2574)
+        result = await doomed.before_model_callback(
+            callback_context=_Ctx(), llm_request=_request(text="x" * 5600)
+        )
+        assert result is not None
+        assert result.content.parts[0].text == DENIAL_TEXT
+        assert doomed.landings == 0
+        assert doomed.ledger.overshoot == 0
+
+    asyncio.run(scenario())
+
+
+def test_non_reasoning_models_pay_no_thinking_tax():
+    """A prior of zero means zero: an agent whose settle history shows no
+    thoughts (or no history at all) gets the pre-toll arithmetic
+    byte-for-byte. DiffusionGemma-style models must not land one turn
+    earlier, or one token poorer, for a toll they never billed."""
+
+    async def scenario():
+        # Zero-thoughts history is trained (not just absent) and still no tax.
+        plugin = _plugin()
+        for _ in range(5):
+            plugin.thoughts.update("worker", 0)
+        assert plugin.thoughts.predict("worker") == 0
+        request = _request()
+        assert await plugin.before_model_callback(
+            callback_context=_Ctx(), llm_request=request
+        ) is None
+        # Byte-for-byte the old allowance: same input estimate, same margin.
+        input_estimate = (
+            estimate_input_tokens(_request()) + len(LANDING_TEXT) // 4 + 8
+        )
+        margin = input_estimate // 10 + 128
+        assert request.config.max_output_tokens == (
+            plugin.ledger.budget - input_estimate - margin
+        )
+        # And no earlier landing: the runway is exactly the old runway.
+        cruising = BudgetGovernorPlugin(
+            budget=4000, estimator=OutputEstimator(prior=1024)
+        )
+        for _ in range(5):
+            cruising.thoughts.update("worker", 0)
+        assert await cruising.before_model_callback(
+            callback_context=_Ctx(), llm_request=_request()
+        ) is None
+        assert cruising.landings == 0
+
+    asyncio.run(scenario())
+
+
+def test_thoughts_estimator_learns_at_settle():
+    """The toll is learned where the governor already looks: settle-time
+    usage metadata. One sample trains (thinking is a property of the model,
+    not of the lucky call), and providers that report thoughts as None
+    (NVIDIA NIM) train zero, not garbage."""
+
+    async def scenario():
+        def settle(plugin, thoughts):
+            return plugin.after_model_callback(
+                callback_context=_Ctx(),
+                llm_response=LlmResponse(
+                    usage_metadata=types.GenerateContentResponseUsageMetadata(
+                        total_token_count=500,
+                        candidates_token_count=100,
+                        thoughts_token_count=thoughts,
+                    )
+                ),
+            )
+
+        big = 50_000  # roomy: ordinary admissions, no landing in the way
+        plugin = BudgetGovernorPlugin(
+            budget=big, estimator=OutputEstimator(prior=1024)
+        )
+        assert plugin.thoughts.predict("worker") == 0  # prior: no tax
+        await plugin.before_model_callback(
+            callback_context=_Ctx(), llm_request=_request()
+        )
+        await settle(plugin, 333)
+        assert plugin.thoughts.predict("worker") == 333  # one sample trains
+
+        nim = BudgetGovernorPlugin(
+            budget=big, estimator=OutputEstimator(prior=1024)
+        )
+        await nim.before_model_callback(
+            callback_context=_Ctx(), llm_request=_request()
+        )
+        await settle(nim, None)
+        assert nim.thoughts.predict("worker") == 0  # None is absence, not data
+
+    asyncio.run(scenario())
+
+
 def test_event_sink_records_the_decision_trail():
     """The governor's decisions leave a record: landing, settle, denial."""
 
