@@ -172,27 +172,27 @@ class BudgetGovernorPlugin(BasePlugin):
         self.visibility = visibility
         self.mission = mission
         self.landings = 0
-        # The landed call is the mission's longest generation, hence the one
-        # a provider hiccup is most likely to interrupt. If it dies, its
-        # reservation is cancelled and the landing must be attemptable again
-        # on the resumed invocation -- otherwise finalizing=True walls off
-        # both ordinary admission AND the landing gate, and the retry meets
-        # a terminal denial (observed live as post-landing decapitations
-        # correlated with transient provider errors).
-        self._landing_reservation: Reservation | None = None
         # Telemetry: every admission decision, emitted as a dict to an
         # optional sink. A governor whose decisions leave no record is not
         # an institution -- and every debugging session of this plugin so
         # far has consisted of reconstructing exactly these events from
         # aggregate arithmetic.
         self._event_sink = event_sink
-        # (reservation, agent key, raw chars-based input estimate) -- the raw
-        # estimate is kept so settle time can calibrate it against the
-        # provider's true prompt count. Keyed by invocation_id, because a
-        # reservation can only be settled by the invocation that made it:
-        # anything still pending once that invocation is over is a leak and
-        # must be reconciled (see _reconcile_stale / after_run_callback).
-        self._pending: dict[str, list[tuple[Reservation, str, int]]] = defaultdict(list)
+        # (reservation, agent key, raw chars-based input estimate, is_landing).
+        # The raw estimate is kept so settle time can calibrate it against the
+        # provider's true prompt count. The is_landing flag travels WITH its
+        # reservation instead of in a shared slot: this plugin governs
+        # CONCURRENT invocations (that is why _pending is keyed by
+        # invocation_id), and a single `self._landing_reservation` slot was a
+        # race -- if a second agent's landing was admitted before a first
+        # agent's settled, it overwrote the slot, so the first agent's settle
+        # read was_landing=False and both fed its landing to the output
+        # estimator (self-reinforcing cliff) and kept its tool declarations
+        # (post-landing decapitation). Namespacing the flag with the
+        # reservation removes the shared state, and with it the race.
+        # Anything still pending once an invocation is over is a leak and must
+        # be reconciled (see _reconcile_stale / after_run_callback).
+        self._pending: dict[str, list[tuple[Reservation, str, int, bool]]] = defaultdict(list)
 
     def _emit(self, kind: str, **data) -> None:
         if self._event_sink is None:
@@ -290,7 +290,7 @@ class BudgetGovernorPlugin(BasePlugin):
                 self._pending[inv_id] = kept
             else:
                 del self._pending[inv_id]
-            for reservation, _, _ in stale:
+            for reservation, _, _, _ in stale:
                 await self.ledger.cancel(reservation)
                 self._emit("reconciled", agent=key, amount=reservation.amount,
                            stale_invocation=inv_id)
@@ -371,12 +371,11 @@ class BudgetGovernorPlugin(BasePlugin):
             )
 
         self._pending[callback_context.invocation_id].append(
-            (reservation, key, raw_input)
+            (reservation, key, raw_input, bool(allowance))
         )
 
         if allowance:
             self.landings += 1
-            self._landing_reservation = reservation
             if llm_request.config is None:
                 llm_request.config = types.GenerateContentConfig()
             # Obedience is not a plan: a landed model may spend its final
@@ -461,11 +460,10 @@ class BudgetGovernorPlugin(BasePlugin):
         stack = self._pending.get(callback_context.invocation_id)
         if not stack:
             return None
-        reservation, key, raw_input = stack.pop()
+        reservation, key, raw_input, was_landing = stack.pop()
 
         usage = llm_response.usage_metadata
         thoughts = getattr(usage, "thoughts_token_count", None) if usage else None
-        was_landing = reservation is self._landing_reservation
         if usage is not None and usage.total_token_count:
             actual = usage.total_token_count
             output = usage.candidates_token_count or 0
@@ -541,10 +539,10 @@ class BudgetGovernorPlugin(BasePlugin):
     ) -> Optional[LlmResponse]:
         stack = self._pending.get(callback_context.invocation_id)
         if stack:
-            reservation, _, _ = stack.pop()
+            reservation, _, _, was_landing = stack.pop()
             await self.ledger.cancel(reservation)
             self._emit("cancelled", amount=reservation.amount,
-                       was_landing=reservation is self._landing_reservation,
+                       was_landing=was_landing,
                        error=type(error).__name__)
         return None
 
@@ -559,7 +557,7 @@ class BudgetGovernorPlugin(BasePlugin):
         the dict does not grow one key per invocation forever.
         """
         entries = self._pending.pop(invocation_context.invocation_id, [])
-        for reservation, key, _ in entries:
+        for reservation, key, _, _ in entries:
             await self.ledger.cancel(reservation)
             self._emit("reconciled", agent=key, amount=reservation.amount,
                        stale_invocation=invocation_context.invocation_id)

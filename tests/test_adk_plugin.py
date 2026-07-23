@@ -104,7 +104,7 @@ def test_denial_is_terminal_after_the_landing():
             callback_context=_Ctx(), llm_request=_request()
         )
         # The landing call settles at its full reservation; budget exhausted.
-        reservation, _, _ = plugin._pending["inv-1"].pop()
+        reservation, _, _, _ = plugin._pending["inv-1"].pop()
         await plugin.ledger.settle(reservation, reservation.amount)
 
         result = await plugin.before_model_callback(
@@ -190,7 +190,7 @@ def test_no_mission_dies_without_a_landing():
                 return
             # Settle at the full reservation (worst case) and grow the
             # context by roughly what a tool-using turn appends.
-            reservation, _, _ = plugin._pending["inv-1"].pop()
+            reservation, _, _, _ = plugin._pending["inv-1"].pop()
             await plugin.ledger.settle(reservation, reservation.amount)
             chars += 6_000
         raise AssertionError("mission never landed and never ended")
@@ -212,7 +212,7 @@ def test_wasted_landing_gets_a_shorter_second_runway():
         ) is None
         first_cap = request.config.max_output_tokens
         # The landed call wastes its allowance on a cheap tool call.
-        reservation, _, _ = plugin._pending["inv-1"].pop()
+        reservation, _, _, _ = plugin._pending["inv-1"].pop()
         await plugin.ledger.settle(reservation, 300)
 
         request2 = _request()
@@ -632,7 +632,7 @@ def test_ordinary_cap_never_exceeds_remaining_headroom():
         assert cap < output_cap(1024)  # the clamp bit
         assert input_estimate + cap == headroom  # ... exactly at the wall
         # A maximal reply settles with zero overshoot and the tranche intact.
-        reservation, _, _ = plugin._pending["inv-1"].pop()
+        reservation, _, _, _ = plugin._pending["inv-1"].pop()
         await plugin.ledger.settle(reservation, input_estimate + cap)
         assert plugin.ledger.available >= 0
         assert plugin.ledger.overshoot == 0
@@ -664,7 +664,7 @@ def test_appealed_cap_clamps_to_the_priority_tranche():
         assert plugin.appeals.log.granted == 1
         cap = request.config.max_output_tokens
         assert input_estimate + cap == headroom  # reserve stays inviolate
-        reservation, _, _ = plugin._pending["inv-1"].pop()
+        reservation, _, _, _ = plugin._pending["inv-1"].pop()
         await plugin.ledger.settle(reservation, input_estimate + cap)
         assert plugin.ledger.overshoot == 0
 
@@ -896,5 +896,49 @@ def test_runway_projects_the_thoughts_reentering_the_context():
         )
         assert request.config.max_output_tokens >= LANDING_FLOOR
         assert plugin.ledger.overshoot == 0
+
+    asyncio.run(scenario())
+
+
+def test_was_landing_travels_with_its_reservation_not_a_shared_slot():
+    """Concurrency regression: was_landing is per-reservation, not a shared
+    slot. The plugin governs concurrent invocations (that is why _pending is
+    keyed by invocation_id), but a single self._landing_reservation slot would
+    be overwritten by a second landing -- so the first agent's settle misread
+    was_landing=False, fed its landing to the output estimator (the
+    self-reinforcing cliff) and kept its tool declarations. The flag now rides
+    inside the pending entry, so two interleaved landings each read their own.
+    """
+
+    async def scenario():
+        events = []
+        plugin = BudgetGovernorPlugin(
+            budget=50_000, estimator=OutputEstimator(prior=1024),
+            event_sink=events.append,
+        )
+        # Two invocations, BOTH landed, settling interleaved -- the exact shape
+        # a single shared slot mishandles (it would hold only the last).
+        res_a = await plugin.ledger.try_reserve(100)
+        res_b = await plugin.ledger.try_reserve(100)
+        plugin._pending["inv-a"].append((res_a, "agent_a", 50, True))
+        plugin._pending["inv-b"].append((res_b, "agent_b", 50, True))
+        usage = types.GenerateContentResponseUsageMetadata(
+            total_token_count=800, candidates_token_count=300,
+            thoughts_token_count=200,
+        )
+        await plugin.after_model_callback(
+            callback_context=_Ctx("inv-a"),
+            llm_response=LlmResponse(usage_metadata=usage),
+        )
+        await plugin.after_model_callback(
+            callback_context=_Ctx("inv-b"),
+            llm_response=LlmResponse(usage_metadata=usage),
+        )
+        settled = {e["agent"]: e for e in events if e["event"] == "settled"}
+        assert settled["agent_a"]["was_landing"] is True
+        assert settled["agent_b"]["was_landing"] is True
+        # Neither landing trained the output estimator: the cliff stays away.
+        assert plugin.estimator._history.get("agent_a", []) == []
+        assert plugin.estimator._history.get("agent_b", []) == []
 
     asyncio.run(scenario())
