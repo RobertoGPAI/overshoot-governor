@@ -112,6 +112,21 @@ def test_quota_close_reverts_unspent_lease():
     assert root.remaining == 900  # 800 lease returned, 100 actually spent
 
 
+def test_quota_tree_spent_no_double_count_after_close():
+    # A closed child's spend is rolled into the parent AND the child is dropped
+    # from the parent's list, so tree_spent() counts it once, not twice. Before
+    # the fix this scenario (the lease-inheritance sim) reported ~2x the spend.
+    root = QuotaNode("root", 1000)
+    child = root.spawn_child("child", 800)
+    grandchild = child.spawn_child("grandchild", 400)
+    for node, amount in [(root, 50), (child, 100), (grandchild, 200)]:
+        node.settle(node.try_consume(amount), amount)
+    grandchild.close()
+    child.close()
+    assert root.tree_spent() == 350  # 50 + 100 + 200, counted exactly once
+    assert root.children == []  # closed children do not accumulate
+
+
 def test_estimator_converges_to_history_quantile():
     est = OutputEstimator(prior=2048, quantile=0.9, min_samples=5)
     assert est.predict("agent") == 2048  # prior until enough samples
