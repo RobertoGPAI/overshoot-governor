@@ -26,9 +26,28 @@ class OutputEstimator:
         self.prior = prior
         self.quantile = quantile
         self.min_samples = min_samples
+        self.frozen = False
         self._history: dict[str, deque[int]] = defaultdict(
             lambda: deque(maxlen=window)
         )
+
+    def freeze(self) -> None:
+        """Pin the estimator: predictions stay, learning stops.
+
+        The snapshot machinery lets production inherit a signed warmth; freeze
+        lets it HOLD that warmth. An owner signs a budget calibrated at a given
+        projection, and an estimator that keeps learning in production drifts
+        the admission wall away from what was signed -- observed in the triage
+        cell, where a staircase's wall walked from 488 to 581 mid-measurement
+        because every settled run kept training it, turning a cliff into a
+        moving target. A frozen estimator makes the wall a fixed cliff again,
+        which is the only state in which the admission frontier is a property
+        of the task rather than of when you happened to probe it.
+        """
+        self.frozen = True
+
+    def unfreeze(self) -> None:
+        self.frozen = False
 
     def predict(self, key: str) -> int:
         """Estimated output tokens for the next call under `key`."""
@@ -41,6 +60,8 @@ class OutputEstimator:
 
     def update(self, key: str, actual: int) -> None:
         """Feed the actual output token count observed at settle time."""
+        if self.frozen:
+            return
         self._history[key].append(actual)
 
     def snapshot(self) -> dict:
@@ -120,12 +141,21 @@ class InputCalibrator:
     ) -> None:
         self.min_samples = min_samples
         self.min_input = min_input
+        self.frozen = False
         self._ratios: dict[str, deque[float]] = defaultdict(
             lambda: deque(maxlen=window)
         )
         self._overheads: dict[str, deque[int]] = defaultdict(
             lambda: deque(maxlen=window)
         )
+
+    def freeze(self) -> None:
+        """Pin the calibrator: the affine correction stays, learning stops.
+        See OutputEstimator.freeze -- a pinned wall is a fixed cliff."""
+        self.frozen = True
+
+    def unfreeze(self) -> None:
+        self.frozen = False
 
     @staticmethod
     def _median(ordered: list) -> float:
@@ -160,6 +190,8 @@ class InputCalibrator:
         return int(estimated * self.factor(key)) + self.overhead(key)
 
     def update(self, key: str, estimated: int, actual: int) -> None:
+        if self.frozen:
+            return
         if actual <= 0:
             return
         if estimated >= self.min_input:
