@@ -81,7 +81,7 @@ class QuotaNode:
         """Terminate this agent; unspent quota reverts to the parent."""
         if self.closed:
             return
-        for child in self.children:
+        for child in list(self.children):  # copy: child.close() mutates this list
             child.close()
         self.closed = True
         if self.parent is not None:
@@ -89,6 +89,12 @@ class QuotaNode:
             self.parent.spent += self.spent
             # the difference (allocation - spent) silently becomes available
             # again in parent.remaining
+            # Drop the closed child from the parent so tree_spent() does not
+            # count its spend twice (once rolled into parent.spent above, once
+            # via the parent's own recursion) and a long-lived parent does not
+            # accumulate dead children.
+            if self in self.parent.children:
+                self.parent.children.remove(self)
 
     def tree_spent(self) -> int:
         """Total tokens actually consumed in this subtree."""
